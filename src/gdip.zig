@@ -43,7 +43,7 @@ pub const Env = struct {
         env.handle = win32.kernel32.LoadLibraryW(L("Gdiplus")) orelse
             return win32.getLastError();
 
-        env.startup = try loadProc(GdiplusStartup, "GdiplusStartu", env.handle);
+        env.startup = try loadProc(GdiplusStartup, "GdiplusStartup", env.handle);
         env.shutdown = try loadProc(GdiplusShutdown, "GdiplusShutdown", env.handle);
         env.load = try loadProc(GdipLoadImageFromFile, "GdipLoadImageFromFile", env.handle);
 
