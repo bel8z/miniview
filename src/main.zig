@@ -2,11 +2,11 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const win32 = @import("win32.zig");
-const gdip = @import("gdip.zig");
 const L = win32.L;
 
 const app_name = L("MiniView");
-var buffer: [4096]u8 = undefined;
+
+var panic_buffer: [4096]u8 = undefined;
 
 pub fn main() void {
     // NOTE (Matteo): Errors are not returned from main in order to call our
@@ -18,17 +18,33 @@ pub fn panic(err: []const u8, maybe_trace: ?*std.builtin.StackTrace) noreturn {
     // NOTE (Matteo): Custom panic handler that reports the error via message box
     // This is because win32 apps don't have an associated console by default,
     // so stderr "is not visible".
-    const msg = if (maybe_trace) |trace|
-        std.fmt.bufPrint(buffer[0..], "{s}\n{}", .{ err, trace }) catch unreachable
-    else
-        std.fmt.bufPrint(buffer[0..], "{s}", .{err}) catch unreachable;
+    var stream = std.io.fixedBufferStream(&panic_buffer);
+    var w = stream.writer();
 
-    var alloc = std.heap.FixedBufferAllocator.init(buffer[msg.len..]);
+    w.print("{s}", .{err}) catch unreachable;
+
+    const win_err = win32.GetLastError();
+    if (win_err != 0) {
+        var buf_utf8: [win32.ERROR_SIZE]u8 = undefined;
+        w.print("\n\nGetLastError() =  {x}: {s}", .{
+            win_err,
+            win32.formatError(win_err, &buf_utf8) catch unreachable,
+        }) catch unreachable;
+    }
+
+    if (maybe_trace) |trace| {
+        w.print("\n{}", .{trace}) catch unreachable;
+    }
+
+    //
+    var alloc = std.heap.FixedBufferAllocator.init(
+        panic_buffer[stream.getPos() catch unreachable ..],
+    );
     _ = win32.messageBoxW(
         null,
-        std.unicode.utf8ToUtf16LeWithNull(alloc.allocator(), msg) catch unreachable,
+        std.unicode.utf8ToUtf16LeWithNull(alloc.allocator(), stream.getWritten()) catch unreachable,
         app_name,
-        0,
+        win32.MB_ICONERROR | win32.MB_OK,
     ) catch unreachable;
 
     // Spinning required because the function is 'noreturn'
@@ -40,10 +56,10 @@ pub fn panic(err: []const u8, maybe_trace: ?*std.builtin.StackTrace) noreturn {
 
 /// Actual main procedure
 fn innerMain() anyerror!void {
-    var env = try gdip.Env.init();
-    defer env.deinit();
+    var gdip = try Gdip.init();
+    defer gdip.deinit();
 
-    const hinst = try win32.getCurrentInstance();
+    const hinst = win32.getCurrentInstance();
 
     const win_class = win32.WNDCLASSEXW{
         .style = 0,
@@ -123,3 +139,130 @@ fn wndProc(
 
     return 0;
 }
+
+pub const Gdip = struct {
+    handle: win32.HMODULE,
+    token: win32.ULONG_PTR,
+    startup: GdiplusStartup,
+    shutdown: GdiplusShutdown,
+    load: GdipLoadImageFromFile,
+
+    pub const Error = win32.Error || error{
+        GenericError,
+        InvalidParameter,
+        OutOfMemory,
+        ObjectBusy,
+        InsufficientBuffer,
+        NotImplemented,
+        Win32Error,
+        WrongState,
+        Aborted,
+        FileNotFound,
+        ValueOverflow,
+        AccessDenied,
+        UnknownImageFormat,
+        FontFamilyNotFound,
+        FontStyleNotFound,
+        NotTrueTypeFont,
+        UnsupportedGdiplusVersion,
+        GdiplusNotInitialized,
+        PropertyNotFound,
+        PropertyNotSupported,
+        ProfileNotFound,
+    };
+
+    pub const Image = opaque {};
+
+    const Self = @This();
+
+    //=== Wrapper interface ===//
+
+    pub fn init() Error!Self {
+        var self: Self = undefined;
+
+        self.handle = win32.kernel32.LoadLibraryW(L("Gdiplus")) orelse
+            return Error.Win32Error;
+
+        self.startup = try loadProc(GdiplusStartup, "GdiplusStartup", self.handle);
+        self.shutdown = try loadProc(GdiplusShutdown, "GdiplusShutdown", self.handle);
+        self.load = try loadProc(GdipLoadImageFromFile, "GdipLoadImageFromFile", self.handle);
+
+        const input = GdiplusStartupInput{};
+        var output: GdiplusStartupOutput = undefined;
+        const status = self.startup(&self.token, &input, &output);
+        std.debug.assert(status == 0);
+
+        return self;
+    }
+
+    pub fn deinit(self: *Self) void {
+        _ = self.shutdown(self.token);
+        _ = win32.kernel32.FreeLibrary(self.handle);
+    }
+
+    pub fn loadImage(self: *Self, filename: []const u8) Error!*Image {
+        var buffer: [1024]u8 = undefined;
+        var alloc = std.heap.FixedBufferAllocator.init(buffer[0..]);
+        const path = try std.unicode.utf8ToUtf16LeWithNull(alloc.allocator(), filename);
+
+        var image: *Image = undefined;
+        const status = self.load(path, &image);
+        if (status != 0) return mapError(status);
+
+        return image;
+    }
+
+    //=== Internal implementation ===//
+
+    const WINGDIPAPI = win32.WINAPI;
+
+    const Status = c_int;
+
+    const GdiplusStartupInput = extern struct {
+        GdiplusVersion: u32 = 1,
+        DebugEventCallback: ?*anyopaque = null,
+        SuppressBackgroundThread: bool = false,
+        SuppressExternalCodecs: bool = false,
+    };
+
+    const GdiplusStartupOutput = struct {
+        NotificationHook: ?*anyopaque,
+        NotificationUnhook: ?*anyopaque,
+    };
+
+    const GdiplusStartup = fn (token: *win32.ULONG_PTR, input: *const GdiplusStartupInput, output: *GdiplusStartupOutput) callconv(WINGDIPAPI) Status;
+    const GdiplusShutdown = fn (token: win32.ULONG_PTR) callconv(WINGDIPAPI) Status;
+    const GdipLoadImageFromFile = fn (filename: win32.LPCWSTR, image: **Image) callconv(WINGDIPAPI) Status;
+
+    inline fn loadProc(comptime T: type, comptime name: [*:0]const u8, handle: win32.HMODULE) !T {
+        return @ptrCast(T, win32.kernel32.GetProcAddress(handle, name) orelse
+            return Error.Win32Error);
+    }
+
+    inline fn mapError(status: Status) Error {
+        return switch (status) {
+            1 => Error.GenericError,
+            2 => Error.InvalidParameter,
+            3 => Error.OutOfMemory,
+            4 => Error.ObjectBusy,
+            5 => Error.InsufficientBuffer,
+            6 => Error.NotImplemented,
+            7 => Error.Win32Error,
+            8 => Error.WrongState,
+            9 => Error.Aborted,
+            10 => Error.FileNotFound,
+            11 => Error.ValueOverflow,
+            12 => Error.AccessDenied,
+            13 => Error.UnknownImageFormat,
+            14 => Error.FontFamilyNotFound,
+            15 => Error.FontStyleNotFound,
+            16 => Error.NotTrueTypeFont,
+            17 => Error.UnsupportedGdiplusVersion,
+            18 => Error.GdiplusNotInitialized,
+            19 => Error.PropertyNotFound,
+            20 => Error.PropertyNotSupported,
+            21 => Error.ProfileNotFound,
+            else => Error.UnexpectedError,
+        };
+    }
+};

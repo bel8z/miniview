@@ -12,10 +12,10 @@ pub usingnamespace win32.user32;
 pub const L = std.unicode.utf8ToUtf16LeStringLiteral;
 
 /// Returns the HINSTANCE corresponding to the process executable
-pub fn getCurrentInstance() Error!win32.HINSTANCE {
+pub fn getCurrentInstance() win32.HINSTANCE {
     return @ptrCast(
         win32.HINSTANCE,
-        win32.kernel32.GetModuleHandleW(null) orelse return getLastError(),
+        win32.kernel32.GetModuleHandleW(null) orelse unreachable,
     );
 }
 
@@ -23,43 +23,28 @@ pub fn getCurrentInstance() Error!win32.HINSTANCE {
 
 pub const Error = std.os.UnexpectedError;
 
-/// Converts the error code returned by GetLastError in a Zig error.
-pub inline fn getLastError() Error {
-    traceError(GetLastError(), "GetLastError()");
-    return error.Unexpected;
+pub extern "kernel32" fn GetLastError() callconv(win32.WINAPI) u32;
+pub extern "kernel32" fn SetLastError(dwErrCode: u32) callconv(win32.WINAPI) void;
+
+pub const ERROR_SIZE: usize = 614;
+
+pub fn formatError(err: u32, buffer: []u8) ![]u8 {
+    var wbuffer: [ERROR_SIZE]u16 = undefined;
+
+    var len = FormatMessageW(
+        win32.FORMAT_MESSAGE_FROM_SYSTEM | win32.FORMAT_MESSAGE_IGNORE_INSERTS,
+        null,
+        err,
+        (0x01 << 10), // MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+        &wbuffer,
+        wbuffer.len,
+        null,
+    );
+
+    if (len == 0) return error.Unexpected;
+
+    return buffer[0..try std.unicode.utf16leToUtf8(buffer, wbuffer[0..len])];
 }
-
-inline fn traceHr(hr: win32.HRESULT) void {
-    traceError(@intCast(win32.DWORD, hr), "HRESULT");
-}
-
-fn traceError(err: u32, comptime src: []const u8) void {
-    // Derived from std.os.unexpected error
-    if (std.os.unexpected_error_tracing) {
-        // 614 is the length of the longest windows error desciption
-        var buf_wstr: [614]u16 = undefined;
-        var buf_utf8: [614]u8 = undefined;
-
-        const len = FormatMessageW(
-            win32.FORMAT_MESSAGE_FROM_SYSTEM | win32.FORMAT_MESSAGE_IGNORE_INSERTS,
-            null,
-            err,
-            (0x01 << 10), // MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-            &buf_wstr,
-            buf_wstr.len,
-            null,
-        );
-
-        if (len != 0) {
-            _ = std.unicode.utf16leToUtf8(&buf_utf8, buf_wstr[0..len]) catch unreachable;
-            std.debug.print("Win32 " ++ src ++ " = {x}: {s}\n", .{ err, buf_utf8[0..len] });
-        }
-
-        std.debug.dumpCurrentStackTrace(null);
-    }
-}
-
-extern "kernel32" fn GetLastError() callconv(win32.WINAPI) u32;
 
 extern "kernel32" fn FormatMessageW(
     dwFlags: u32,
@@ -99,7 +84,7 @@ pub fn getDefaultCursor() win32.HCURSOR {
 
 pub fn getStandardCursor(id: CursorId) Error!win32.HCURSOR {
     const name = @intToPtr(win32.LPCWSTR, @enumToInt(id));
-    return LoadCursorW(null, name) orelse getLastError();
+    return LoadCursorW(null, name) orelse error.Unexpected;
 }
 
 extern "user32" fn LoadCursorW(
@@ -129,7 +114,7 @@ pub const PaintBuffer = struct {
     pub fn clear(self: *PaintBuffer, rect: win32.RECT) Error!void {
         const hr = BufferedPaintClear(self.pb, &rect);
         if (hr != 0) {
-            traceHr(hr);
+            SetLastError(@intCast(u32, hr));
             return error.Unexpected;
         }
     }
@@ -138,7 +123,7 @@ pub const PaintBuffer = struct {
 pub inline fn initBufferedPaint() Error!void {
     const hr = BufferedPaintInit();
     if (hr != 0) {
-        traceHr(hr);
+        SetLastError(@intCast(u32, hr));
         return error.Unexpected;
     }
 }
@@ -146,7 +131,7 @@ pub inline fn initBufferedPaint() Error!void {
 pub inline fn deinitBufferedPaint() void {
     const hr = BufferedPaintUnInit();
     if (hr != 0) {
-        traceHr(hr);
+        SetLastError(@intCast(u32, hr));
         unreachable;
     }
 }
@@ -164,17 +149,17 @@ pub inline fn beginBufferedPaint(
         }
     }
 
-    return getLastError();
+    return error.Unexpected;
 }
 
 pub inline fn endBufferedPaint(win: win32.HWND, pb: PaintBuffer) Error!void {
     const hr = EndBufferedPaint(pb.pb, win32.TRUE);
     if (hr != 0) {
-        traceError(GetLastError(), "HRESULT");
+        SetLastError(@intCast(u32, hr));
         return error.Unexpected;
     }
 
-    if (EndPaint(win, &pb.ps) != win32.TRUE) return getLastError();
+    if (EndPaint(win, &pb.ps) != win32.TRUE) unreachable;
 }
 
 const HPAINTBUFFER = *opaque {};
