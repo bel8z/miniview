@@ -176,7 +176,6 @@ pub const Gdip = struct {
         ObjectBusy,
         InsufficientBuffer,
         NotImplemented,
-        Win32Error,
         WrongState,
         Aborted,
         FileNotFound,
@@ -203,7 +202,7 @@ pub const Gdip = struct {
         var self: Self = undefined;
 
         self.handle = win32.kernel32.LoadLibraryW(L("Gdiplus")) orelse
-            return Error.Win32Error;
+            return error.Win32Error;
 
         self.startup = try win32.loadProc(GdiplusStartup, "GdiplusStartup", self.handle);
         self.shutdown = try win32.loadProc(GdiplusShutdown, "GdiplusShutdown", self.handle);
@@ -258,28 +257,28 @@ pub const Gdip = struct {
 
     inline fn mapError(status: Status) Error {
         return switch (status) {
-            1 => Error.GenericError,
-            2 => Error.InvalidParameter,
-            3 => Error.OutOfMemory,
-            4 => Error.ObjectBusy,
-            5 => Error.InsufficientBuffer,
-            6 => Error.NotImplemented,
-            7 => Error.Win32Error,
-            8 => Error.WrongState,
-            9 => Error.Aborted,
-            10 => Error.FileNotFound,
-            11 => Error.ValueOverflow,
-            12 => Error.AccessDenied,
-            13 => Error.UnknownImageFormat,
-            14 => Error.FontFamilyNotFound,
-            15 => Error.FontStyleNotFound,
-            16 => Error.NotTrueTypeFont,
-            17 => Error.UnsupportedGdiplusVersion,
-            18 => Error.GdiplusNotInitialized,
-            19 => Error.PropertyNotFound,
-            20 => Error.PropertyNotSupported,
-            21 => Error.ProfileNotFound,
-            else => Error.UnexpectedError,
+            1 => error.GenericError,
+            2 => error.InvalidParameter,
+            3 => error.OutOfMemory,
+            4 => error.ObjectBusy,
+            5 => error.InsufficientBuffer,
+            6 => error.NotImplemented,
+            7 => error.Win32Error,
+            8 => error.WrongState,
+            9 => error.Aborted,
+            10 => error.FileNotFound,
+            11 => error.ValueOverflow,
+            12 => error.AccessDenied,
+            13 => error.UnknownImageFormat,
+            14 => error.FontFamilyNotFound,
+            15 => error.FontStyleNotFound,
+            16 => error.NotTrueTypeFont,
+            17 => error.UnsupportedGdiplusVersion,
+            18 => error.GdiplusNotInitialized,
+            19 => error.PropertyNotFound,
+            20 => error.PropertyNotSupported,
+            21 => error.ProfileNotFound,
+            else => error.Win32Error,
         };
     }
 };

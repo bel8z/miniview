@@ -21,12 +21,12 @@ pub fn getCurrentInstance() win32.HINSTANCE {
 
 pub inline fn loadProc(comptime T: type, comptime name: [*:0]const u8, handle: win32.HMODULE) Error!T {
     return @ptrCast(T, win32.kernel32.GetProcAddress(handle, name) orelse
-        return error.Unexpected);
+        return error.Win32Error);
 }
 
 //=== Error handling ===//
 
-pub const Error = std.os.UnexpectedError;
+pub const Error = error{Win32Error};
 
 pub extern "kernel32" fn GetLastError() callconv(win32.WINAPI) u32;
 pub extern "kernel32" fn SetLastError(dwErrCode: u32) callconv(win32.WINAPI) void;
@@ -46,7 +46,7 @@ pub fn formatError(err: u32, buffer: []u8) ![]u8 {
         null,
     );
 
-    if (len == 0) return error.Unexpected;
+    if (len == 0) return error.Win32Error;
 
     return buffer[0..try std.unicode.utf16leToUtf8(buffer, wbuffer[0..len])];
 }
@@ -89,7 +89,7 @@ pub fn getDefaultCursor() win32.HCURSOR {
 
 pub fn getStandardCursor(id: CursorId) Error!win32.HCURSOR {
     const name = @intToPtr(win32.LPCWSTR, @enumToInt(id));
-    return LoadCursorW(null, name) orelse error.Unexpected;
+    return LoadCursorW(null, name) orelse error.Win32Error;
 }
 
 extern "user32" fn LoadCursorW(
@@ -119,10 +119,10 @@ pub const MenuItem = union(enum) {
 };
 
 pub fn createMenu() Error!win32.HMENU {
-    return CreateMenu() orelse error.Unexpected;
+    return CreateMenu() orelse error.Win32Error;
 }
 
-pub fn appendMenu(menu: win32.HMENU, item: MenuItem, flags: u32) !void {
+pub fn appendMenu(menu: win32.HMENU, item: MenuItem, flags: u32) Error!void {
     const res = switch (item) {
         .String => |x| AppendMenuW(menu, flags, menuIdToPtr(x.id), @ptrCast(*const anyopaque, x.str)),
         .Popup => |x| AppendMenuW(menu, flags, @ptrCast(*anyopaque, x.sub_menu), @ptrCast(*const anyopaque, x.name)),
@@ -130,7 +130,7 @@ pub fn appendMenu(menu: win32.HMENU, item: MenuItem, flags: u32) !void {
         .OwnerDraw => |x| AppendMenuW(menu, flags, menuIdToPtr(x.id), x.data),
     };
 
-    if (res != win32.TRUE) return error.Unexpected;
+    if (res != win32.TRUE) return error.Win32Error;
 }
 
 inline fn menuIdToPtr(id: u32) *const anyopaque {
@@ -168,7 +168,7 @@ pub const PaintBuffer = struct {
         const hr = BufferedPaintClear(self.pb, &rect);
         if (hr != 0) {
             SetLastError(@intCast(u32, hr));
-            return error.Unexpected;
+            return error.Win32Error;
         }
     }
 };
@@ -177,7 +177,7 @@ pub inline fn initBufferedPaint() Error!void {
     const hr = BufferedPaintInit();
     if (hr != 0) {
         SetLastError(@intCast(u32, hr));
-        return error.Unexpected;
+        return error.Win32Error;
     }
 }
 
@@ -202,14 +202,14 @@ pub inline fn beginBufferedPaint(
         }
     }
 
-    return error.Unexpected;
+    return error.Win32Error;
 }
 
 pub inline fn endBufferedPaint(win: win32.HWND, pb: PaintBuffer) Error!void {
     const hr = EndBufferedPaint(pb.pb, win32.TRUE);
     if (hr != 0) {
         SetLastError(@intCast(u32, hr));
-        return error.Unexpected;
+        return error.Win32Error;
     }
 
     if (EndPaint(win, &pb.ps) != win32.TRUE) unreachable;
@@ -285,13 +285,13 @@ pub const OPENFILENAMEW = extern struct {
     FlagsEx: win32.DWORD = 0,
 };
 
-pub fn getOpenFileName(ofn: *OPENFILENAMEW) !bool {
+pub fn getOpenFileName(ofn: *OPENFILENAMEW) Error!bool {
     std.debug.assert(ofn.lStructSize == @sizeOf(OPENFILENAMEW));
 
     const name = L("Comdlg32");
     const lib = win32.kernel32.GetModuleHandleW(name) orelse
         win32.kernel32.LoadLibraryW(name) orelse
-        return error.Unexpected;
+        return error.Win32Error;
 
     const gofn = try loadProc(GetOpenFileNameW, "GetOpenFileNameW", lib);
     if (gofn(ofn) == win32.TRUE) return true;
@@ -301,7 +301,7 @@ pub fn getOpenFileName(ofn: *OPENFILENAMEW) !bool {
     if (err == 0) return false;
 
     // TODO (Matteo): Translate errors
-    return error.Unexpected;
+    return error.Win32Error;
 }
 
 const GetOpenFileNameW = fn (ofn: *OPENFILENAMEW) callconv(win32.WINAPI) win32.BOOL;
