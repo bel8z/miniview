@@ -19,6 +19,11 @@ pub fn getCurrentInstance() win32.HINSTANCE {
     );
 }
 
+pub inline fn loadProc(comptime T: type, comptime name: [*:0]const u8, handle: win32.HMODULE) Error!T {
+    return @ptrCast(T, win32.kernel32.GetProcAddress(handle, name) orelse
+        return error.Unexpected);
+}
+
 //=== Error handling ===//
 
 pub const Error = std.os.UnexpectedError;
@@ -244,3 +249,60 @@ extern "uxtheme" fn BufferedPaintClear(
     hBufferedPaint: HPAINTBUFFER,
     prc: *const win32.RECT,
 ) callconv(win32.WINAPI) win32.HRESULT;
+
+//=== File dialogs ===//
+
+pub const OPENFILENAMEW = extern struct {
+    lStructSize: win32.DWORD = @sizeOf(OPENFILENAMEW),
+    hwndOwner: ?win32.HWND = null,
+    hInstance: ?win32.HINSTANCE = null,
+    lpstrFilter: ?win32.LPCWSTR = null,
+    lpstrCustomFilter: ?win32.LPWSTR = null,
+    nMaxCustFilter: win32.DWORD = 0,
+    nFilterIndex: win32.DWORD = 0,
+    lpstrFile: win32.LPWSTR,
+    nMaxFile: win32.DWORD,
+    lpstrFileTitle: ?win32.LPWSTR = null,
+    nMaxFileTitle: win32.DWORD = 0,
+    lpstrInitialDir: ?win32.LPCWSTR = null,
+    lpstrTitle: ?win32.LPCWSTR = null,
+    Flags: win32.DWORD = 0,
+    nFileOffset: u16 = 0,
+    nFileExtension: u16 = 0,
+    lpstrDefExt: ?win32.LPCWSTR = null,
+    lCustData: win32.LPARAM = 0,
+    lpfnHook: ?*anyopaque = null,
+    lpTemplateName: ?win32.LPCWSTR = null,
+
+    // #ifdef _MAC
+    // lpEditInfo: ?*anyopaque = null,
+    // lpstrPrompt: ?win32.LPCSTR = null,
+
+    // #if (_WIN32_WINNT >= 0x0500)
+    pvReserved: ?*anyopaque = null,
+    dwReserved: win32.DWORD = 0,
+
+    FlagsEx: win32.DWORD = 0,
+};
+
+pub fn getOpenFileName(ofn: *OPENFILENAMEW) !bool {
+    std.debug.assert(ofn.lStructSize == @sizeOf(OPENFILENAMEW));
+
+    const name = L("Comdlg32");
+    const lib = win32.kernel32.GetModuleHandleW(name) orelse
+        win32.kernel32.LoadLibraryW(name) orelse
+        return error.Unexpected;
+
+    const gofn = try loadProc(GetOpenFileNameW, "GetOpenFileNameW", lib);
+    if (gofn(ofn) == win32.TRUE) return true;
+
+    const cdee = try loadProc(CommDlgExtendedError, "CommDlgExtendedError", lib);
+    const err = cdee();
+    if (err == 0) return false;
+
+    // TODO (Matteo): Translate errors
+    return error.Unexpected;
+}
+
+const GetOpenFileNameW = fn (ofn: *OPENFILENAMEW) callconv(win32.WINAPI) win32.BOOL;
+const CommDlgExtendedError = fn () callconv(win32.WINAPI) u32;

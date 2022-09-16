@@ -146,7 +146,13 @@ fn wndProc(
         win32.WM_COMMAND => {
             if (wparam & 0xffff0000 == 0) {
                 switch (@intToEnum(Command, wparam & 0xffff)) {
-                    .Open => _ = win32.messageBoxW(win, L("Open!"), app_name, 0) catch unreachable,
+                    .Open => {
+                        var file_buf = [_:0]u16{0} ** 1024;
+                        var ofn = win32.OPENFILENAMEW{ .lpstrFile = &file_buf, .nMaxFile = file_buf.len };
+                        if (win32.getOpenFileName(&ofn) catch unreachable) {
+                            _ = win32.messageBoxW(win, &file_buf, app_name, 0) catch unreachable;
+                        }
+                    },
                 }
             }
         },
@@ -199,9 +205,9 @@ pub const Gdip = struct {
         self.handle = win32.kernel32.LoadLibraryW(L("Gdiplus")) orelse
             return Error.Win32Error;
 
-        self.startup = try loadProc(GdiplusStartup, "GdiplusStartup", self.handle);
-        self.shutdown = try loadProc(GdiplusShutdown, "GdiplusShutdown", self.handle);
-        self.load = try loadProc(GdipLoadImageFromFile, "GdipLoadImageFromFile", self.handle);
+        self.startup = try win32.loadProc(GdiplusStartup, "GdiplusStartup", self.handle);
+        self.shutdown = try win32.loadProc(GdiplusShutdown, "GdiplusShutdown", self.handle);
+        self.load = try win32.loadProc(GdipLoadImageFromFile, "GdipLoadImageFromFile", self.handle);
 
         const input = GdiplusStartupInput{};
         var output: GdiplusStartupOutput = undefined;
@@ -249,11 +255,6 @@ pub const Gdip = struct {
     const GdiplusStartup = fn (token: *win32.ULONG_PTR, input: *const GdiplusStartupInput, output: *GdiplusStartupOutput) callconv(WINGDIPAPI) Status;
     const GdiplusShutdown = fn (token: win32.ULONG_PTR) callconv(WINGDIPAPI) Status;
     const GdipLoadImageFromFile = fn (filename: win32.LPCWSTR, image: **Image) callconv(WINGDIPAPI) Status;
-
-    inline fn loadProc(comptime T: type, comptime name: [*:0]const u8, handle: win32.HMODULE) !T {
-        return @ptrCast(T, win32.kernel32.GetProcAddress(handle, name) orelse
-            return Error.Win32Error);
-    }
 
     inline fn mapError(status: Status) Error {
         return switch (status) {
