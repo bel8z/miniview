@@ -8,6 +8,10 @@ const app_name = L("MiniView");
 
 var panic_buffer: [4096]u8 = undefined;
 
+const Command = enum(u32) {
+    Open = 1,
+};
+
 pub fn main() void {
     // NOTE (Matteo): Errors are not returned from main in order to call our
     // custom 'panic' handler - see below.
@@ -36,7 +40,9 @@ pub fn panic(err: []const u8, maybe_trace: ?*std.builtin.StackTrace) noreturn {
         w.print("\n{}", .{trace}) catch unreachable;
     }
 
-    //
+    // TODO (Matteo): When text is going back and forth between Zig's stdlib and
+    // Win32 a lot of UTF8<->UTF16 conversions are involved; maybe we can mitigate
+    // this a bit by fully embracing Win32 and UTF16.
     var alloc = std.heap.FixedBufferAllocator.init(
         panic_buffer[stream.getPos() catch unreachable ..],
     );
@@ -82,6 +88,9 @@ fn innerMain() anyerror!void {
     try win32.initBufferedPaint();
     defer win32.deinitBufferedPaint();
 
+    const menu = try win32.createMenu();
+    try win32.appendMenu(menu, .{ .String = .{ .id = @enumToInt(Command.Open), .str = L("Open") } }, 0);
+
     const win_flags = win32.WS_OVERLAPPEDWINDOW;
     const win = try win32.createWindowExW(
         0,
@@ -93,7 +102,7 @@ fn innerMain() anyerror!void {
         win32.CW_USEDEFAULT,
         win32.CW_USEDEFAULT,
         null,
-        null,
+        menu,
         hinst,
         null,
     );
@@ -133,6 +142,13 @@ fn wndProc(
                 defer win32.endBufferedPaint(win, pb) catch unreachable;
                 paint(pb);
             } else |_| unreachable;
+        },
+        win32.WM_COMMAND => {
+            if (wparam & 0xffff0000 == 0) {
+                switch (@intToEnum(Command, wparam & 0xffff)) {
+                    .Open => _ = win32.messageBoxW(win, L("Open!"), app_name, 0) catch unreachable,
+                }
+            }
         },
         else => return win32.defWindowProcW(win, msg, wparam, lparam),
     }

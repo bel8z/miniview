@@ -92,6 +92,54 @@ extern "user32" fn LoadCursorW(
     cursor_name: win32.LPCWSTR,
 ) callconv(win32.WINAPI) ?win32.HCURSOR;
 
+//=== Menus ===//
+
+pub const MF_CHECKED: u32 = 0x00000008;
+pub const MF_DISABLED: u32 = 0x00000002;
+pub const MF_GRAYED: u32 = 0x00000001;
+pub const MF_MENUBARBREAK: u32 = 0x00000020;
+pub const MF_MENUBREAK: u32 = 0x00000040;
+
+// NOTE (Matteo): These are kept internal - specific functions are provided instead
+const MF_OWNERDRAW: u32 = 0x00000100;
+const MF_BITMAP: u32 = 0x00000004;
+const MF_POPUP: u32 = 0x00000010;
+const MF_SEPARATOR: u32 = 0x00000800;
+
+pub const MenuItem = union(enum) {
+    String: struct { id: u32, str: win32.LPCWSTR },
+    Popup: struct { sub_menu: win32.HMENU, name: win32.LPCWSTR },
+    Bitmap: struct { id: u32, handle: win32.HANDLE },
+    OwnerDraw: struct { id: u32, data: *anyopaque },
+};
+
+pub fn createMenu() Error!win32.HMENU {
+    return CreateMenu() orelse error.Unexpected;
+}
+
+pub fn appendMenu(menu: win32.HMENU, item: MenuItem, flags: u32) !void {
+    const res = switch (item) {
+        .String => |x| AppendMenuW(menu, flags, menuIdToPtr(x.id), @ptrCast(*const anyopaque, x.str)),
+        .Popup => |x| AppendMenuW(menu, flags, @ptrCast(*anyopaque, x.sub_menu), @ptrCast(*const anyopaque, x.name)),
+        .Bitmap => |x| AppendMenuW(menu, flags, menuIdToPtr(x.id), x.handle),
+        .OwnerDraw => |x| AppendMenuW(menu, flags, menuIdToPtr(x.id), x.data),
+    };
+
+    if (res != win32.TRUE) return error.Unexpected;
+}
+
+inline fn menuIdToPtr(id: u32) *const anyopaque {
+    return @intToPtr(*const anyopaque, id);
+}
+
+extern "user32" fn CreateMenu() callconv(win32.WINAPI) ?win32.HMENU;
+extern "user32" fn AppendMenuW(
+    hMenu: win32.HMENU,
+    uFlags: u32,
+    uIDNewItem: *const anyopaque,
+    lpNewItem: *const anyopaque,
+) callconv(win32.WINAPI) win32.BOOL;
+
 //=== Buffered window painting ===//
 
 pub const PAINTSTRUCT = extern struct {
