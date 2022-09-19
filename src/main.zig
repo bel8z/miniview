@@ -62,9 +62,6 @@ pub fn panic(err: []const u8, maybe_trace: ?*std.builtin.StackTrace) noreturn {
 
 /// Actual main procedure
 fn innerMain() anyerror!void {
-    var gdip = try Gdip.init();
-    defer gdip.deinit();
-
     const hinst = win32.getCurrentInstance();
 
     const win_class = win32.WNDCLASSEXW{
@@ -107,6 +104,10 @@ fn innerMain() anyerror!void {
         null,
     );
 
+    var mv = try MiniView.init();
+    defer mv.deinit();
+    try setAppPtr(win, &mv);
+
     _ = win32.showWindow(win, win32.SW_SHOWDEFAULT);
     try win32.updateWindow(win);
 
@@ -128,12 +129,30 @@ fn paint(pb: win32.PaintBuffer) void {
     _ = pb;
 }
 
+fn setAppPtr(win: win32.HWND, ptr: anytype) !void {
+    _ = try win32.setWindowLongPtrW(
+        win,
+        win32.GWL_USERDATA,
+        @intCast(isize, @ptrToInt(ptr)),
+    );
+}
+
+fn getAppPtr(comptime T: type, win: win32.HWND) ?*T {
+    if (win32.getWindowLongPtrW(win, win32.GWL_USERDATA)) |address| {
+        return @intToPtr(?*T, @intCast(usize, address));
+    } else |_| {
+        return null;
+    }
+}
+
 fn wndProc(
     win: win32.HWND,
     msg: u32,
     wparam: win32.WPARAM,
     lparam: win32.LPARAM,
 ) callconv(win32.WINAPI) win32.LRESULT {
+    var miniview = getAppPtr(MiniView, win) orelse return win32.defWindowProcW(win, msg, wparam, lparam);
+
     switch (msg) {
         win32.WM_CLOSE => win32.destroyWindow(win) catch unreachable,
         win32.WM_DESTROY => win32.PostQuitMessage(0),
@@ -146,13 +165,7 @@ fn wndProc(
         win32.WM_COMMAND => {
             if (wparam & 0xffff0000 == 0) {
                 switch (@intToEnum(Command, wparam & 0xffff)) {
-                    .Open => {
-                        var file_buf = [_:0]u16{0} ** 1024;
-                        var ofn = win32.OPENFILENAMEW{ .lpstrFile = &file_buf, .nMaxFile = file_buf.len };
-                        if (win32.getOpenFileName(&ofn) catch unreachable) {
-                            _ = win32.messageBoxW(win, &file_buf, app_name, 0) catch unreachable;
-                        }
-                    },
+                    .Open => miniview.open(win) catch unreachable,
                 }
             }
         },
@@ -162,12 +175,21 @@ fn wndProc(
     return 0;
 }
 
-pub const Gdip = struct {
-    handle: win32.HMODULE,
-    token: win32.ULONG_PTR,
-    startup: GdiplusStartup,
-    shutdown: GdiplusShutdown,
-    load: GdipLoadImageFromFile,
+const Image = opaque {};
+
+const MiniView = struct {
+    // GDI+ stuff
+    gdip_dll: win32.HMODULE,
+    gdip_startup: GdiplusStartup,
+    gdip_shutdown: GdiplusShutdown,
+    img_load: GdipCreateBitmapFromFile,
+    img_dispose: GdipDisposeImage,
+    gdip_token: win32.ULONG_PTR = 0,
+
+    // App specific stuff
+    image: ?*Image = null,
+
+    const Self = @This();
 
     pub const Error = win32.Error || error{
         GenericError,
@@ -192,48 +214,60 @@ pub const Gdip = struct {
         ProfileNotFound,
     };
 
-    pub const Image = opaque {};
-
-    const Self = @This();
-
-    //=== Wrapper interface ===//
-
     pub fn init() Error!Self {
-        var self: Self = undefined;
+        var dll = win32.kernel32.LoadLibraryW(L("Gdiplus")) orelse return error.Win32Error;
 
-        self.handle = win32.kernel32.LoadLibraryW(L("Gdiplus")) orelse
-            return error.Win32Error;
-
-        self.startup = try win32.loadProc(GdiplusStartup, "GdiplusStartup", self.handle);
-        self.shutdown = try win32.loadProc(GdiplusShutdown, "GdiplusShutdown", self.handle);
-        self.load = try win32.loadProc(GdipLoadImageFromFile, "GdipLoadImageFromFile", self.handle);
+        var self = Self{
+            .gdip_dll = dll,
+            .gdip_startup = try win32.loadProc(GdiplusStartup, "GdiplusStartup", dll),
+            .gdip_shutdown = try win32.loadProc(GdiplusShutdown, "GdiplusShutdown", dll),
+            .img_load = try win32.loadProc(GdipCreateBitmapFromFile, "GdipCreateBitmapFromFile", dll),
+            .img_dispose = try win32.loadProc(GdipDisposeImage, "GdipDisposeImage", dll),
+        };
 
         const input = GdiplusStartupInput{};
         var output: GdiplusStartupOutput = undefined;
-        const status = self.startup(&self.token, &input, &output);
+        const status = self.gdip_startup(&self.gdip_token, &input, &output);
         std.debug.assert(status == 0);
 
         return self;
     }
 
     pub fn deinit(self: *Self) void {
-        _ = self.shutdown(self.token);
-        _ = win32.kernel32.FreeLibrary(self.handle);
+        self.disposeImage() catch {};
+        _ = self.gdip_shutdown(self.gdip_token);
+        _ = win32.kernel32.FreeLibrary(self.gdip_dll);
     }
 
-    pub fn loadImage(self: *Self, filename: []const u8) Error!*Image {
-        var buffer: [1024]u8 = undefined;
-        var alloc = std.heap.FixedBufferAllocator.init(buffer[0..]);
-        const path = try std.unicode.utf8ToUtf16LeWithNull(alloc.allocator(), filename);
+    pub fn open(self: *MiniView, win: win32.HWND) Error!void {
+        var file_buf = [_:0]u16{0} ** 1024;
+        var ofn = win32.OPENFILENAMEW{
+            .lpstrFile = &file_buf,
+            .nMaxFile = file_buf.len,
+            .lpstrFilter = L("Image files\x00*.bmp;*.png;*.jpg;*.jpeg;*.tiff\x00"),
+        };
 
-        var image: *Image = undefined;
-        const status = self.load(path, &image);
-        if (status != 0) return mapError(status);
+        if (try win32.getOpenFileName(&ofn)) {
+            var image: *Image = undefined;
+            const status = self.img_load(&file_buf, &image);
+            if (status != 0) return mapError(status);
 
-        return image;
+            _ = win32.messageBoxW(win, &file_buf, app_name ++ L(": Image Loaded"), 0) catch
+                return error.Win32Error;
+
+            try self.disposeImage();
+            self.image = image;
+        }
     }
 
-    //=== Internal implementation ===//
+    fn disposeImage(self: *Self) Error!void {
+        if (self.image) |old_img| {
+            const status = self.img_dispose(old_img);
+            if (status != 0) return mapError(status);
+        }
+    }
+
+    //=== Internal GDI+ implementation ===//
 
     const WINGDIPAPI = win32.WINAPI;
 
@@ -253,7 +287,8 @@ pub const Gdip = struct {
 
     const GdiplusStartup = fn (token: *win32.ULONG_PTR, input: *const GdiplusStartupInput, output: *GdiplusStartupOutput) callconv(WINGDIPAPI) Status;
     const GdiplusShutdown = fn (token: win32.ULONG_PTR) callconv(WINGDIPAPI) Status;
-    const GdipLoadImageFromFile = fn (filename: win32.LPCWSTR, image: **Image) callconv(WINGDIPAPI) Status;
+    const GdipCreateBitmapFromFile = fn (filename: win32.LPCWSTR, image: **Image) callconv(WINGDIPAPI) Status;
+    const GdipDisposeImage = fn (image: *Image) callconv(WINGDIPAPI) Status;
 
     inline fn mapError(status: Status) Error {
         return switch (status) {
