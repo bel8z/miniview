@@ -6,11 +6,8 @@ const L = win32.L;
 
 const app_name = L("MiniView");
 
+// NOTE (Matteo): Kept static to allow for growing it without risk of smashing the stack
 var panic_buffer: [4096]u8 = undefined;
-
-const Command = enum(u32) {
-    Open = 1,
-};
 
 pub fn main() void {
     // NOTE (Matteo): Errors are not returned from main in order to call our
@@ -124,9 +121,36 @@ fn innerMain() anyerror!void {
     }
 }
 
-fn paint(pb: win32.PaintBuffer) void {
-    // TODO: Painting code goes here
-    _ = pb;
+fn wndProc(
+    win: win32.HWND,
+    msg: u32,
+    wparam: win32.WPARAM,
+    lparam: win32.LPARAM,
+) callconv(win32.WINAPI) win32.LRESULT {
+    var miniview = getAppPtr(MiniView, win) orelse return win32.defWindowProcW(win, msg, wparam, lparam);
+
+    switch (msg) {
+        win32.WM_CLOSE => win32.destroyWindow(win) catch unreachable,
+        win32.WM_DESTROY => win32.PostQuitMessage(0),
+        win32.WM_PAINT => {
+            if (win32.beginBufferedPaint(win)) |pb| {
+                defer win32.endBufferedPaint(win, pb) catch unreachable;
+                // Actual painting is application defined
+                miniview.paint(pb, win) catch unreachable;
+            } else |_| unreachable;
+        },
+        win32.WM_COMMAND => {
+            if (wparam & 0xffff0000 == 0) {
+                miniview.processCommand(
+                    @intToEnum(Command, wparam & 0xffff),
+                    win,
+                ) catch unreachable;
+            }
+        },
+        else => return win32.defWindowProcW(win, msg, wparam, lparam),
+    }
+
+    return 0;
 }
 
 fn setAppPtr(win: win32.HWND, ptr: anytype) !void {
@@ -145,46 +169,20 @@ fn getAppPtr(comptime T: type, win: win32.HWND) ?*T {
     }
 }
 
-fn wndProc(
-    win: win32.HWND,
-    msg: u32,
-    wparam: win32.WPARAM,
-    lparam: win32.LPARAM,
-) callconv(win32.WINAPI) win32.LRESULT {
-    var miniview = getAppPtr(MiniView, win) orelse return win32.defWindowProcW(win, msg, wparam, lparam);
-
-    switch (msg) {
-        win32.WM_CLOSE => win32.destroyWindow(win) catch unreachable,
-        win32.WM_DESTROY => win32.PostQuitMessage(0),
-        win32.WM_PAINT => {
-            if (win32.beginBufferedPaint(win)) |pb| {
-                defer win32.endBufferedPaint(win, pb) catch unreachable;
-                paint(pb);
-            } else |_| unreachable;
-        },
-        win32.WM_COMMAND => {
-            if (wparam & 0xffff0000 == 0) {
-                switch (@intToEnum(Command, wparam & 0xffff)) {
-                    .Open => miniview.open(win) catch unreachable,
-                }
-            }
-        },
-        else => return win32.defWindowProcW(win, msg, wparam, lparam),
-    }
-
-    return 0;
-}
-
 const Image = opaque {};
+
+const Command = enum(u32) {
+    Open = 1,
+};
 
 const MiniView = struct {
     // GDI+ stuff
+    gdip_token: win32.ULONG_PTR = 0,
     gdip_dll: win32.HMODULE,
     gdip_startup: GdiplusStartup,
     gdip_shutdown: GdiplusShutdown,
     img_load: GdipCreateBitmapFromFile,
     img_dispose: GdipDisposeImage,
-    gdip_token: win32.ULONG_PTR = 0,
 
     // App specific stuff
     image: ?*Image = null,
@@ -239,7 +237,20 @@ const MiniView = struct {
         _ = win32.kernel32.FreeLibrary(self.gdip_dll);
     }
 
-    pub fn open(self: *MiniView, win: win32.HWND) Error!void {
+    pub fn processCommand(self: *Self, command: Command, win: win32.HWND) Error!void {
+        switch (command) {
+            .Open => try self.open(win),
+        }
+    }
+
+    pub fn paint(self: *const Self, pb: win32.PaintBuffer, win: win32.HWND) Error!void {
+        // TODO: Painting code goes here
+        _ = self;
+        _ = pb;
+        _ = win;
+    }
+
+    fn open(self: *MiniView, win: win32.HWND) Error!void {
         var file_buf = [_:0]u16{0} ** 1024;
         var ofn = win32.OPENFILENAMEW{
             .lpstrFile = &file_buf,
@@ -249,8 +260,7 @@ const MiniView = struct {
 
         if (try win32.getOpenFileName(&ofn)) {
             var image: *Image = undefined;
-            const status = self.img_load(&file_buf, &image);
-            if (status != 0) return mapError(status);
+            try checkStatus(self.img_load(&file_buf, &image));
 
             _ = win32.messageBoxW(win, &file_buf, app_name ++ L(": Image Loaded"), 0) catch
                 return error.Win32Error;
@@ -262,8 +272,7 @@ const MiniView = struct {
 
     fn disposeImage(self: *Self) Error!void {
         if (self.image) |old_img| {
-            const status = self.img_dispose(old_img);
-            if (status != 0) return mapError(status);
+            try checkStatus(self.img_dispose(old_img));
         }
     }
 
@@ -289,6 +298,10 @@ const MiniView = struct {
     const GdiplusShutdown = fn (token: win32.ULONG_PTR) callconv(WINGDIPAPI) Status;
     const GdipCreateBitmapFromFile = fn (filename: win32.LPCWSTR, image: **Image) callconv(WINGDIPAPI) Status;
     const GdipDisposeImage = fn (image: *Image) callconv(WINGDIPAPI) Status;
+
+    inline fn checkStatus(status: Status) Error!void {
+        if (status != 0) return mapError(status);
+    }
 
     inline fn mapError(status: Status) Error {
         return switch (status) {
