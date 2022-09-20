@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const win32 = std.os.windows;
 
 //=== Re-exports ===//
@@ -273,36 +274,35 @@ pub const OPENFILENAMEW = extern struct {
     lCustData: win32.LPARAM = 0,
     lpfnHook: ?*anyopaque = null,
     lpTemplateName: ?win32.LPCWSTR = null,
-
-    // #ifdef _MAC
-    // lpEditInfo: ?*anyopaque = null,
-    // lpstrPrompt: ?win32.LPCSTR = null,
+    _mac_fields: MacFields = .{},
+    _w2k_fields: Win2kFields = .{},
+    FlagsEx: win32.DWORD = 0,
 
     // #if (_WIN32_WINNT >= 0x0500)
-    pvReserved: ?*anyopaque = null,
-    dwReserved: win32.DWORD = 0,
+    const Win2kFields = if (builtin.os.isAtLeast(.windows, .win2k) orelse unreachable)
+        packed struct { pvReserved: ?*anyopaque = null, dwReserved: win32.DWORD = 0 }
+    else
+        packed struct {};
 
-    FlagsEx: win32.DWORD = 0,
+    // #ifdef _MAC
+    const _MAC = false;
+    const MacFields = if (_MAC)
+        packed struct { lpEditInfo: ?*anyopaque = null, lpstrPrompt: ?win32.LPCSTR = null }
+    else
+        packed struct {};
 };
 
 pub fn getOpenFileName(ofn: *OPENFILENAMEW) Error!bool {
     std.debug.assert(ofn.lStructSize == @sizeOf(OPENFILENAMEW));
 
-    const name = L("Comdlg32");
-    const lib = win32.kernel32.GetModuleHandleW(name) orelse
-        win32.kernel32.LoadLibraryW(name) orelse
-        return error.Win32Error;
+    if (GetOpenFileNameW(ofn) == win32.TRUE) return true;
 
-    const gofn = try loadProc(GetOpenFileNameW, "GetOpenFileNameW", lib);
-    if (gofn(ofn) == win32.TRUE) return true;
-
-    const cdee = try loadProc(CommDlgExtendedError, "CommDlgExtendedError", lib);
-    const err = cdee();
+    const err = CommDlgExtendedError();
     if (err == 0) return false;
 
     // TODO (Matteo): Translate errors
     return error.Win32Error;
 }
 
-const GetOpenFileNameW = fn (ofn: *OPENFILENAMEW) callconv(win32.WINAPI) win32.BOOL;
-const CommDlgExtendedError = fn () callconv(win32.WINAPI) u32;
+extern "comdlg32" fn GetOpenFileNameW(ofn: *OPENFILENAMEW) callconv(win32.WINAPI) win32.BOOL;
+extern "comdlg32" fn CommDlgExtendedError() callconv(win32.WINAPI) u32;
