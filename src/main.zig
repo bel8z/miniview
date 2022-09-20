@@ -73,7 +73,7 @@ const app = struct {
         const hinst = win32.getCurrentInstance();
 
         const win_class = win32.WNDCLASSEXW{
-            .style = 0,
+            .style = win32.CS_HREDRAW | win32.CS_VREDRAW,
             .lpfnWndProc = wndProc,
             .hInstance = hinst,
             .lpszClassName = app_name,
@@ -122,7 +122,7 @@ const app = struct {
         try win32.updateWindow(win);
 
         // Main loop
-        defer disposeImage();
+        defer disposeImage() catch unreachable;
 
         var msg: win32.MSG = undefined;
 
@@ -168,9 +168,28 @@ const app = struct {
     }
 
     fn paint(pb: win32.PaintBuffer, win: win32.HWND) gdip.Error!void {
-        // TODO: Painting code goes here
-        _ = pb;
         _ = win;
+
+        var gfx: *gdip.Graphics = undefined;
+        try gdip.checkStatus(gdip.createFromHDC(pb.dc, &gfx));
+        defer gdip.checkStatus(gdip.deleteGraphics(gfx)) catch unreachable;
+
+        const rect = pb.ps.rcPaint;
+
+        try gdip.checkStatus(gdip.graphicsClear(gfx, 0xff000000));
+
+        if (image) |bmp| {
+            // TODO (Matteo): Preserve scale ratio and apply proper interpolation
+            // according to size (NN for upscaling, cubic for downscaling)
+            try gdip.checkStatus(gdip.drawImageRect(
+                gfx,
+                bmp,
+                rect.left,
+                rect.top,
+                rect.right - rect.left,
+                rect.bottom - rect.top,
+            ));
+        }
     }
 
     fn open(win: win32.HWND) gdip.Error!void {
@@ -190,6 +209,8 @@ const app = struct {
 
             try disposeImage();
             image = new_image;
+
+            _ = win32.InvalidateRect(win, null, win32.TRUE);
         }
     }
 
@@ -199,6 +220,11 @@ const app = struct {
         }
     }
 };
+
+inline fn argb(a: u8, r: u8, g: u8, b: u8) u32 {
+    return @intCast(u32, a) << 24 | @intCast(u32, r) << 16 |
+        @intCast(u32, g) << 8 | b;
+}
 
 //=== GDI+ wrapper ===//
 
@@ -228,6 +254,7 @@ const gdip = struct {
 
     pub const Status = c_int;
     pub const Image = opaque {};
+    pub const Graphics = opaque {};
 
     const WINGDIPAPI = win32.WINAPI;
 
@@ -251,18 +278,30 @@ const gdip = struct {
     const GdiplusShutdown = fn (token: win32.ULONG_PTR) callconv(WINGDIPAPI) Status;
     const GdipCreateBitmapFromFile = fn (filename: win32.LPCWSTR, image: **Image) callconv(WINGDIPAPI) Status;
     const GdipDisposeImage = fn (image: *Image) callconv(WINGDIPAPI) Status;
+    const GdipCreateFromHDC = fn (hdc: win32.HDC, graphics: **Graphics) callconv(WINGDIPAPI) Status;
+    const GdipDeleteGraphics = fn (graphics: *Graphics) callconv(WINGDIPAPI) Status;
+    const GdipGraphicsClear = fn (graphics: *Graphics, color: u32) callconv(WINGDIPAPI) Status;
+    const GdipDrawImageRectI = fn (graphics: *Graphics, image: *Image, x: i32, y: i32, width: i32, height: i32) callconv(WINGDIPAPI) Status;
 
+    var dll: win32.HMODULE = undefined;
     var token: win32.ULONG_PTR = 0;
     var shutdown: GdiplusShutdown = undefined;
     var createBitmapFromFile: GdipCreateBitmapFromFile = undefined;
     var disposeImage: GdipDisposeImage = undefined;
-    var dll: win32.HMODULE = undefined;
+    var createFromHDC: GdipCreateFromHDC = undefined;
+    var deleteGraphics: GdipDeleteGraphics = undefined;
+    var graphicsClear: GdipGraphicsClear = undefined;
+    var drawImageRect: GdipDrawImageRectI = undefined;
 
     pub fn init() Error!void {
         dll = win32.kernel32.LoadLibraryW(L("Gdiplus")) orelse return error.Win32Error;
         shutdown = try win32.loadProc(GdiplusShutdown, "GdiplusShutdown", dll);
         createBitmapFromFile = try win32.loadProc(GdipCreateBitmapFromFile, "GdipCreateBitmapFromFile", dll);
         disposeImage = try win32.loadProc(GdipDisposeImage, "GdipDisposeImage", dll);
+        createFromHDC = try win32.loadProc(GdipCreateFromHDC, "GdipCreateFromHDC", dll);
+        deleteGraphics = try win32.loadProc(GdipDeleteGraphics, "GdipDeleteGraphics", dll);
+        graphicsClear = try win32.loadProc(GdipGraphicsClear, "GdipGraphicsClear", dll);
+        drawImageRect = try win32.loadProc(GdipDrawImageRectI, "GdipDrawImageRectI", dll);
 
         const startup = try win32.loadProc(GdiplusStartup, "GdiplusStartup", dll);
         const input = GdiplusStartupInput{};

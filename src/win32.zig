@@ -216,6 +216,12 @@ pub inline fn endBufferedPaint(win: win32.HWND, pb: PaintBuffer) Error!void {
     if (EndPaint(win, &pb.ps) != win32.TRUE) unreachable;
 }
 
+pub extern "user32" fn InvalidateRect(
+    hWnd: win32.HWND,
+    lpRect: ?*const win32.RECT,
+    bErase: win32.BOOL,
+) callconv(win32.WINAPI) win32.BOOL;
+
 const HPAINTBUFFER = *opaque {};
 const BP_PAINTPARAMS = opaque {};
 const BP_BUFFERFORMAT = enum(c_int) { COMPATIBLEBITMAP, DIB, TOPDOWNDIB, TOPDOWNMONODIB };
