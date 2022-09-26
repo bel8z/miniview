@@ -212,6 +212,7 @@ const app = struct {
     fn open(win: win32.HWND) gdip.Error!void {
         var file_buf = [_:0]u16{0} ** 1024;
         var ofn = win32.OPENFILENAMEW{
+            .hwndOwner = win,
             .lpstrFile = &file_buf,
             .nMaxFile = file_buf.len,
             .lpstrFilter = L("Image files\x00*.bmp;*.png;*.jpg;*.jpeg;*.tiff\x00"),
