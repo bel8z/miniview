@@ -61,14 +61,74 @@ pub fn panic(err: []const u8, maybe_trace: ?*std.builtin.StackTrace) noreturn {
 
 //=== Actual application ===//
 
+const Bump = struct {
+    buffer: []u8,
+    alloc_pos: usize = 0,
+    commit_pos: usize = 0,
+
+    const Self = @This();
+
+    pub fn init() !Self {
+        const size = 1024 * 1024 * 1024;
+
+        const ptr = try win32.VirtualAlloc(
+            null,
+            size,
+            win32.MEM_RESERVE,
+            win32.PAGE_NOACCESS,
+        );
+
+        return Self{ .buffer = @ptrCast([*]u8, ptr)[0..size] };
+    }
+
+    pub fn deinit(self: *Self) void {
+        win32.VirtualFree(@ptrCast(win32.LPVOID, self.buffer.ptr), 0, win32.MEM_RELEASE);
+        self.alloc_pos = 0;
+        self.commit_pos = 0;
+        self.buffer = self.buffer[0..0];
+    }
+
+    pub fn push(self: *Self, comptime T: type, count: usize) ![]T {
+        const cap = self.buffer.len;
+        const size = count * @sizeOf(T);
+        const offset = std.mem.alignForward(self.alloc_pos, @alignOf(T));
+
+        if (size > cap or offset > cap or offset + size > cap) return error.OutOfMemory;
+
+        if (offset > self.commit_pos) {
+            const ptr = @ptrCast(win32.LPVOID, self.buffer.ptr + self.commit_pos);
+            const next_pos = std.mem.alignForward(offset, std.mem.page_size);
+            std.debug.assert(next_pos <= cap);
+
+            _ = try win32.VirtualAlloc(
+                ptr,
+                next_pos - self.commit_pos,
+                win32.MEM_COMMIT,
+                win32.PAGE_READWRITE,
+            );
+
+            self.commit_pos = next_pos;
+        }
+
+        self.alloc_pos = offset;
+
+        return std.mem.bytesAsSlice(T, self.buffer[offset..size]);
+    }
+};
+
 const app = struct {
     const Command = enum(u32) {
         Open = 1,
     };
 
     var image: ?*gdip.Image = null;
+    var memory: Bump = undefined;
 
     pub fn main() anyerror!void {
+        // Setup memory
+        memory = try Bump.init();
+        defer memory.deinit();
+
         // Register window class
         const hinst = win32.getCurrentInstance();
 
