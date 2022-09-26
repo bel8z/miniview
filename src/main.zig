@@ -150,7 +150,7 @@ const app = struct {
                 if (win32.beginBufferedPaint(win)) |pb| {
                     defer win32.endBufferedPaint(win, pb) catch unreachable;
                     // Actual painting is application defined
-                    paint(pb, win) catch unreachable;
+                    paint(pb) catch unreachable;
                 } else |_| unreachable;
             },
             win32.WM_COMMAND => {
@@ -167,27 +167,44 @@ const app = struct {
         return 0;
     }
 
-    fn paint(pb: win32.PaintBuffer, win: win32.HWND) gdip.Error!void {
-        _ = win;
-
+    fn paint(pb: win32.PaintBuffer) gdip.Error!void {
         var gfx: *gdip.Graphics = undefined;
         try gdip.checkStatus(gdip.createFromHDC(pb.dc, &gfx));
         defer gdip.checkStatus(gdip.deleteGraphics(gfx)) catch unreachable;
 
-        const rect = pb.ps.rcPaint;
-
         try gdip.checkStatus(gdip.graphicsClear(gfx, 0xff000000));
 
         if (image) |bmp| {
-            // TODO (Matteo): Preserve scale ratio and apply proper interpolation
-            // according to size (NN for upscaling, cubic for downscaling)
+            // Compute dimensions
+            const bounds = pb.ps.rcPaint;
+            const bounds_w = @intToFloat(f32, bounds.right - bounds.left);
+            const bounds_h = @intToFloat(f32, bounds.bottom - bounds.top);
+            var img_w: f32 = undefined;
+            var img_h: f32 = undefined;
+            try gdip.checkStatus(gdip.getImageDimension(bmp, &img_w, &img_h));
+
+            // Downscale out-of-bounds images
+            var scale = std.math.min(bounds_w / img_w, bounds_h / img_h);
+            if (scale < 1) {
+                // Bicubic interpolation displays better results when downscaling
+                try gdip.checkStatus(gdip.setInterpolationMode(gfx, .HighQualityBicubic));
+            } else {
+                // No upscaling and no interpolation
+                scale = 1;
+                try gdip.checkStatus(gdip.setInterpolationMode(gfx, .NearestNeighbor));
+            }
+
+            // Draw
+            const draw_w = scale * img_w;
+            const draw_h = scale * img_h;
+
             try gdip.checkStatus(gdip.drawImageRect(
                 gfx,
                 bmp,
-                rect.left,
-                rect.top,
-                rect.right - rect.left,
-                rect.bottom - rect.top,
+                0.5 * (bounds_w - draw_w),
+                0.5 * (bounds_h - draw_h),
+                draw_w,
+                draw_h,
             ));
         }
     }
@@ -202,7 +219,7 @@ const app = struct {
 
         if (try win32.getOpenFileName(&ofn)) {
             var new_image: *gdip.Image = undefined;
-            try gdip.checkStatus(gdip.createBitmapFromFile(&file_buf, &new_image));
+            try gdip.checkStatus(gdip.createImageFromFile(&file_buf, &new_image));
 
             _ = win32.messageBoxW(win, &file_buf, app_name ++ L(": Image Loaded"), 0) catch
                 return error.Win32Error;
@@ -252,6 +269,18 @@ const gdip = struct {
         ProfileNotFound,
     };
 
+    pub const InterpolationMode = enum(c_int) {
+        Invalid = -1,
+        Default = 0,
+        LowQuality = 1,
+        HighQuality = 2,
+        Bilinear = 3,
+        Bicubic = 4,
+        NearestNeighbor = 5,
+        HighQualityBilinear = 6,
+        HighQualityBicubic = 7,
+    };
+
     pub const Status = c_int;
     pub const Image = opaque {};
     pub const Graphics = opaque {};
@@ -278,30 +307,43 @@ const gdip = struct {
     const GdiplusShutdown = fn (token: win32.ULONG_PTR) callconv(WINGDIPAPI) Status;
     const GdipCreateBitmapFromFile = fn (filename: win32.LPCWSTR, image: **Image) callconv(WINGDIPAPI) Status;
     const GdipDisposeImage = fn (image: *Image) callconv(WINGDIPAPI) Status;
+    const GdipGetImageDimension = fn (image: *Image, width: *f32, height: *f32) callconv(WINGDIPAPI) Status;
     const GdipCreateFromHDC = fn (hdc: win32.HDC, graphics: **Graphics) callconv(WINGDIPAPI) Status;
     const GdipDeleteGraphics = fn (graphics: *Graphics) callconv(WINGDIPAPI) Status;
     const GdipGraphicsClear = fn (graphics: *Graphics, color: u32) callconv(WINGDIPAPI) Status;
-    const GdipDrawImageRectI = fn (graphics: *Graphics, image: *Image, x: i32, y: i32, width: i32, height: i32) callconv(WINGDIPAPI) Status;
+    const GdipDrawImageRect = fn (
+        graphics: *Graphics,
+        image: *Image,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) callconv(WINGDIPAPI) Status;
+    const GdipSetInterpolationMode = fn (graphics: *Graphics, mode: InterpolationMode) callconv(WINGDIPAPI) Status;
 
     var dll: win32.HMODULE = undefined;
     var token: win32.ULONG_PTR = 0;
     var shutdown: GdiplusShutdown = undefined;
-    var createBitmapFromFile: GdipCreateBitmapFromFile = undefined;
+    var createImageFromFile: GdipCreateBitmapFromFile = undefined;
     var disposeImage: GdipDisposeImage = undefined;
+    var getImageDimension: GdipGetImageDimension = undefined;
     var createFromHDC: GdipCreateFromHDC = undefined;
     var deleteGraphics: GdipDeleteGraphics = undefined;
     var graphicsClear: GdipGraphicsClear = undefined;
-    var drawImageRect: GdipDrawImageRectI = undefined;
+    var drawImageRect: GdipDrawImageRect = undefined;
+    var setInterpolationMode: GdipSetInterpolationMode = undefined;
 
     pub fn init() Error!void {
         dll = win32.kernel32.LoadLibraryW(L("Gdiplus")) orelse return error.Win32Error;
         shutdown = try win32.loadProc(GdiplusShutdown, "GdiplusShutdown", dll);
-        createBitmapFromFile = try win32.loadProc(GdipCreateBitmapFromFile, "GdipCreateBitmapFromFile", dll);
+        createImageFromFile = try win32.loadProc(GdipCreateBitmapFromFile, "GdipCreateBitmapFromFile", dll);
         disposeImage = try win32.loadProc(GdipDisposeImage, "GdipDisposeImage", dll);
+        getImageDimension = try win32.loadProc(GdipGetImageDimension, "GdipGetImageDimension", dll);
         createFromHDC = try win32.loadProc(GdipCreateFromHDC, "GdipCreateFromHDC", dll);
         deleteGraphics = try win32.loadProc(GdipDeleteGraphics, "GdipDeleteGraphics", dll);
         graphicsClear = try win32.loadProc(GdipGraphicsClear, "GdipGraphicsClear", dll);
-        drawImageRect = try win32.loadProc(GdipDrawImageRectI, "GdipDrawImageRectI", dll);
+        drawImageRect = try win32.loadProc(GdipDrawImageRect, "GdipDrawImageRect", dll);
+        setInterpolationMode = try win32.loadProc(GdipSetInterpolationMode, "GdipSetInterpolationMode", dll);
 
         const startup = try win32.loadProc(GdiplusStartup, "GdiplusStartup", dll);
         const input = GdiplusStartupInput{};
