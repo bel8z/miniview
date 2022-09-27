@@ -203,28 +203,40 @@ const app = struct {
         wparam: win32.WPARAM,
         lparam: win32.LPARAM,
     ) callconv(win32.WINAPI) win32.LRESULT {
+        return if (processEvent(win, msg, wparam, lparam) catch unreachable)
+            0
+        else
+            win32.defWindowProcW(win, msg, wparam, lparam);
+    }
+
+    fn processEvent(
+        win: win32.HWND,
+        msg: u32,
+        wparam: win32.WPARAM,
+        lparam: win32.LPARAM,
+    ) !bool {
+        _ = lparam;
+
         switch (msg) {
-            win32.WM_CLOSE => win32.destroyWindow(win) catch unreachable,
+            win32.WM_CLOSE => try win32.destroyWindow(win),
             win32.WM_DESTROY => win32.PostQuitMessage(0),
             win32.WM_PAINT => {
-                if (win32.beginBufferedPaint(win)) |pb| {
-                    defer win32.endBufferedPaint(win, pb) catch unreachable;
-                    // Actual painting is application defined
-                    paint(pb) catch unreachable;
-                } else |_| unreachable;
+                const pb = try win32.beginBufferedPaint(win);
+                defer win32.endBufferedPaint(win, pb) catch unreachable;
+                try paint(pb);
             },
             win32.WM_COMMAND => {
                 if (wparam & 0xffff0000 == 0) {
                     const command = @intToEnum(Command, wparam & 0xffff);
                     switch (command) {
-                        .Open => open(win) catch unreachable,
+                        .Open => try open(win),
                     }
                 }
             },
-            else => return win32.defWindowProcW(win, msg, wparam, lparam),
+            else => return false,
         }
 
-        return 0;
+        return true;
     }
 
     fn paint(pb: win32.PaintBuffer) gdip.Error!void {
@@ -281,9 +293,6 @@ const app = struct {
         if (try win32.getOpenFileName(&ofn)) {
             var new_image: *gdip.Image = undefined;
             try gdip.checkStatus(gdip.createImageFromFile(&file_buf, &new_image));
-
-            _ = win32.messageBoxW(win, &file_buf, app_name ++ L(": Image Loaded"), 0) catch
-                return error.Win32Error;
 
             try disposeImage();
             image = new_image;
