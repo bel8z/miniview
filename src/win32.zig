@@ -260,20 +260,20 @@ extern "uxtheme" fn BufferedPaintClear(
 //=== File dialogs ===//
 
 pub const OPENFILENAMEW = extern struct {
-    lStructSize: win32.DWORD = @sizeOf(OPENFILENAMEW),
+    lStructSize: u32 = @sizeOf(OPENFILENAMEW),
     hwndOwner: ?win32.HWND = null,
     hInstance: ?win32.HINSTANCE = null,
     lpstrFilter: ?win32.LPCWSTR = null,
     lpstrCustomFilter: ?win32.LPWSTR = null,
-    nMaxCustFilter: win32.DWORD = 0,
-    nFilterIndex: win32.DWORD = 0,
+    nMaxCustFilter: u32 = 0,
+    nFilterIndex: u32 = 0,
     lpstrFile: win32.LPWSTR,
-    nMaxFile: win32.DWORD,
+    nMaxFile: u32,
     lpstrFileTitle: ?win32.LPWSTR = null,
-    nMaxFileTitle: win32.DWORD = 0,
+    nMaxFileTitle: u32 = 0,
     lpstrInitialDir: ?win32.LPCWSTR = null,
     lpstrTitle: ?win32.LPCWSTR = null,
-    Flags: win32.DWORD = 0,
+    Flags: u32 = 0,
     nFileOffset: u16 = 0,
     nFileExtension: u16 = 0,
     lpstrDefExt: ?win32.LPCWSTR = null,
@@ -282,11 +282,11 @@ pub const OPENFILENAMEW = extern struct {
     lpTemplateName: ?win32.LPCWSTR = null,
     _mac_fields: MacFields = .{},
     _w2k_fields: Win2kFields = .{},
-    FlagsEx: win32.DWORD = 0,
+    FlagsEx: u32 = 0,
 
     // #if (_WIN32_WINNT >= 0x0500)
     const Win2kFields = if (builtin.os.isAtLeast(.windows, .win2k) orelse unreachable)
-        packed struct { pvReserved: ?*anyopaque = null, dwReserved: win32.DWORD = 0 }
+        packed struct { pvReserved: ?*anyopaque = null, dwReserved: u32 = 0 }
     else
         packed struct {};
 
@@ -312,3 +312,54 @@ pub fn getOpenFileName(ofn: *OPENFILENAMEW) Error!bool {
 
 extern "comdlg32" fn GetOpenFileNameW(ofn: *OPENFILENAMEW) callconv(win32.WINAPI) win32.BOOL;
 extern "comdlg32" fn CommDlgExtendedError() callconv(win32.WINAPI) u32;
+
+//=== COM stuff ===//
+
+pub const IStream = extern struct {
+    lpVtbl: [*c]Vtbl,
+
+    const Vtbl = extern struct {
+        QueryInterface: fn (
+            [*c]IStream,
+            ?*anyopaque,
+            [*c]?*anyopaque,
+        ) callconv(win32.WINAPI) win32.HRESULT,
+
+        AddRef: fn ([*c]IStream) callconv(win32.WINAPI) u32,
+        Release: fn ([*c]IStream) callconv(win32.WINAPI) u32,
+
+        Read: fn (
+            [*c]IStream,
+            ?*anyopaque,
+            u32,
+            [*c]u32,
+        ) callconv(win32.WINAPI) win32.HRESULT,
+
+        Write: fn (
+            [*c]IStream,
+            ?*const anyopaque,
+            u32,
+            [*c]u32,
+        ) callconv(win32.WINAPI) win32.HRESULT,
+
+        Seek: fn ([*c]IStream, i64, u32, [*c]u64) callconv(win32.WINAPI) win32.HRESULT,
+        SetSize: fn ([*c]IStream, u64) callconv(win32.WINAPI) win32.HRESULT,
+
+        CopyTo: fn (
+            [*c]IStream,
+            [*c]IStream,
+            u64,
+            [*c]u64,
+            [*c]u64,
+        ) callconv(win32.WINAPI) win32.HRESULT,
+
+        Commit: fn ([*c]IStream, u32) callconv(win32.WINAPI) win32.HRESULT,
+        Revert: fn ([*c]IStream) callconv(win32.WINAPI) win32.HRESULT,
+
+        LockRegion: fn ([*c]IStream, u64, u64, u32) callconv(win32.WINAPI) win32.HRESULT,
+        UnlockRegion: fn ([*c]IStream, u64, u64, u32) callconv(win32.WINAPI) win32.HRESULT,
+
+        Stat: fn ([*c]IStream, ?*anyopaque, u32) callconv(win32.WINAPI) win32.HRESULT,
+        Clone: fn ([*c]IStream, [*c][*c]IStream) callconv(win32.WINAPI) win32.HRESULT,
+    };
+};
