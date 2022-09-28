@@ -363,3 +363,12 @@ pub const IStream = extern struct {
         Clone: fn ([*c]IStream, [*c][*c]IStream) callconv(win32.WINAPI) win32.HRESULT,
     };
 };
+
+pub fn createMemStream(mem: []const u8) !*IStream {
+    return SHCreateMemStream(
+        mem.ptr,
+        @intCast(win32.UINT, mem.len),
+    ) orelse error.Win32Error;
+}
+
+extern "shlwapi" fn SHCreateMemStream(pInit: [*]const u8, cbInit: win32.UINT) ?*IStream;
