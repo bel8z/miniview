@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const assert = std.debug.assert;
 
 const win32 = @import("win32.zig");
 const L = win32.L;
@@ -98,7 +99,7 @@ const Bump = struct {
         if (offset > self.commit_pos) {
             const ptr = @ptrCast(win32.LPVOID, self.buffer.ptr + self.commit_pos);
             const next_pos = std.mem.alignForward(offset, std.mem.page_size);
-            std.debug.assert(next_pos <= cap);
+            assert(next_pos <= cap);
 
             _ = try win32.VirtualAlloc(
                 ptr,
@@ -223,6 +224,10 @@ const app = struct {
             win32.WM_PAINT => {
                 const pb = try win32.beginBufferedPaint(win);
                 defer win32.endBufferedPaint(win, pb) catch unreachable;
+
+                // The background is not erased since the given brush is null
+                assert(pb.ps.fErase == win32.TRUE);
+
                 try paint(pb);
             },
             win32.WM_COMMAND => {
