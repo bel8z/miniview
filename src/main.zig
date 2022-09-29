@@ -62,60 +62,72 @@ pub fn panic(err: []const u8, maybe_trace: ?*std.builtin.StackTrace) noreturn {
 
 //=== Actual application ===//
 
-const Bump = struct {
-    buffer: []u8,
-    alloc_pos: usize = 0,
-    commit_pos: usize = 0,
+fn List(comptime T: type) type {
+    return struct {
+        items: []T,
+        capacity: usize,
+        committed_bytes: usize,
 
-    const Self = @This();
+        const Self = @This();
 
-    pub fn init() !Self {
-        const size = 1024 * 1024 * 1024;
+        pub fn init() !Self {
+            const size = 1024 * 1024 * 1024;
+            const alignment = @alignOf(T);
 
-        const ptr = try win32.VirtualAlloc(
-            null,
-            size,
-            win32.MEM_RESERVE,
-            win32.PAGE_NOACCESS,
-        );
-
-        return Self{ .buffer = @ptrCast([*]u8, ptr)[0..size] };
-    }
-
-    pub fn deinit(self: *Self) void {
-        win32.VirtualFree(@ptrCast(win32.LPVOID, self.buffer.ptr), 0, win32.MEM_RELEASE);
-        self.alloc_pos = 0;
-        self.commit_pos = 0;
-        self.buffer = self.buffer[0..0];
-    }
-
-    pub fn push(self: *Self, comptime T: type, count: usize) ![]T {
-        const cap = self.buffer.len;
-        const size = count * @sizeOf(T);
-        const offset = std.mem.alignForward(self.alloc_pos, @alignOf(T));
-
-        if (size > cap or offset > cap or offset + size > cap) return error.OutOfMemory;
-
-        if (offset > self.commit_pos) {
-            const ptr = @ptrCast(win32.LPVOID, self.buffer.ptr + self.commit_pos);
-            const next_pos = std.mem.alignForward(offset, std.mem.page_size);
-            assert(next_pos <= cap);
-
-            _ = try win32.VirtualAlloc(
-                ptr,
-                next_pos - self.commit_pos,
-                win32.MEM_COMMIT,
-                win32.PAGE_READWRITE,
+            const ptr = try win32.VirtualAlloc(
+                null,
+                size,
+                win32.MEM_RESERVE,
+                win32.PAGE_NOACCESS,
             );
 
-            self.commit_pos = next_pos;
+            if (!std.mem.isAligned(@ptrToInt(ptr), alignment)) return error.MisalignedAddress;
+
+            var self: Self = undefined;
+            self.capacity = size / @sizeOf(T);
+            self.committed_bytes = 0;
+            self.items.ptr = @ptrCast([*]FileInfo, @alignCast(alignment, ptr));
+            self.items.len = 0;
+
+            return self;
         }
 
-        self.alloc_pos = offset;
+        pub fn deinit(self: *Self) void {
+            self.clear();
+            self.capacity = 0;
+            self.committed_bytes = 0;
+            win32.VirtualFree(@ptrCast(win32.LPVOID, self.items.ptr), 0, win32.MEM_RELEASE);
+        }
 
-        return std.mem.bytesAsSlice(T, self.buffer[offset..size]);
-    }
-};
+        pub fn clear(self: *Self) void {
+            self.items.len = 0;
+        }
+
+        pub fn add(self: *Self, item: T) !void {
+            const request = self.items.len + 1;
+
+            if (self.capacity < request) return error.OutOfMemory;
+
+            const to_commit = std.mem.alignForward(request * @sizeOf(T), std.mem.page_size);
+
+            if (to_commit > self.committed_bytes) {
+                assert(to_commit <= self.capacity * @sizeOf(T));
+
+                _ = try win32.VirtualAlloc(
+                    @intToPtr(win32.LPVOID, @ptrToInt(self.items.ptr) + self.committed_bytes),
+                    to_commit - self.committed_bytes,
+                    win32.MEM_COMMIT,
+                    win32.PAGE_READWRITE,
+                );
+
+                self.committed_bytes = to_commit;
+            }
+
+            self.items.len = request;
+            self.items[request - 1] = item;
+        }
+    };
+}
 
 const FileIter = struct {
     find: win32.HANDLE = undefined,
@@ -158,6 +170,25 @@ const FileIter = struct {
     }
 };
 
+const FileInfo = struct {
+    buf: [128]u16,
+    len: usize,
+
+    fn init(file_name: []const u16) FileInfo {
+        var self: FileInfo = undefined;
+
+        self.len = file_name.len;
+        assert(self.len <= self.buf.len);
+
+        std.mem.copy(u16, self.buf[0..self.len], file_name);
+        return self;
+    }
+
+    fn name(self: FileInfo) []const u16 {
+        return self.buf[0..self.len];
+    }
+};
+
 const extensions = L("*.bmp;*.png;*.jpg;*.jpeg;*.tiff");
 
 const app = struct {
@@ -166,8 +197,15 @@ const app = struct {
     };
 
     var image: ?*gdip.Image = null;
+    var dir_buffer: [1024:0]u16 = undefined;
+    var dir_len: usize = 0;
+    var files: List(FileInfo) = undefined;
+    var file_index: usize = 0;
 
     pub fn main() anyerror!void {
+        // Init memory block
+        files = try List(FileInfo).init();
+        defer files.deinit();
 
         // Register window class
         const hinst = win32.getCurrentInstance();
@@ -277,6 +315,33 @@ const app = struct {
                     }
                 }
             },
+            win32.WM_KEYDOWN => {
+                const count = files.items.len;
+
+                if (count > 1) {
+                    if (wparam == 0x25) {
+                        file_index = if (file_index == 0) count - 1 else file_index - 1;
+                    } else if (wparam == 0x27) {
+                        file_index = if (file_index == count - 1) 0 else file_index + 1;
+                    }
+
+                    const name = files.items[file_index].name();
+                    const full_len = name.len + dir_len;
+
+                    std.mem.copy(u16, dir_buffer[dir_len..], name);
+                    dir_buffer[full_len] = 0;
+
+                    const full_name = dir_buffer[0..full_len :0];
+
+                    var new_image: *gdip.Image = undefined;
+                    try gdip.checkStatus(gdip.createImageFromFile(full_name, &new_image));
+
+                    try disposeImage();
+                    image = new_image;
+
+                    _ = win32.InvalidateRect(win, null, win32.TRUE);
+                }
+            },
             else => return false,
         }
 
@@ -326,26 +391,39 @@ const app = struct {
     }
 
     fn open(win: win32.HWND) !void {
-        var buffer = [_:0]u16{0} ** 1024;
         var ofn = win32.OPENFILENAMEW{
             .hwndOwner = win,
-            .lpstrFile = &buffer,
-            .nMaxFile = buffer.len,
+            .lpstrFile = &dir_buffer,
+            .nMaxFile = dir_buffer.len,
             .lpstrFilter = L("Image files\x00") ++ extensions ++ L("\x00"),
         };
 
         if (try win32.getOpenFileName(&ofn)) {
-            // const len = std.mem.lastIndexOfScalar(u16, &buffer, '\\') orelse unreachable;
-            // var iter = try FileIter.init(buffer[0..len]);
-            // while (iter.next()) |path| {
-            //     _ = try win32.messageBoxW(null, path, L(""), 0);
-            // }
-
             var new_image: *gdip.Image = undefined;
-            try gdip.checkStatus(gdip.createImageFromFile(&buffer, &new_image));
+            try gdip.checkStatus(gdip.createImageFromFile(&dir_buffer, &new_image));
 
             try disposeImage();
             image = new_image;
+
+            dir_len = std.mem.lastIndexOfScalar(u16, &dir_buffer, '\\') orelse unreachable;
+            dir_len += 1;
+
+            const filename = dir_buffer[dir_len.. :0];
+
+            var iter = try FileIter.init(dir_buffer[0..dir_len]);
+            while (iter.next()) |file| {
+                const dot = std.mem.lastIndexOfScalar(u16, file, '.') orelse continue;
+                const ext = file[dot..];
+                if (ext.len == 0) continue;
+
+                if (std.mem.indexOf(u16, extensions, ext)) |_| {
+                    try files.add(FileInfo.init(file));
+
+                    if (std.mem.eql(u16, file, filename)) {
+                        file_index = files.items.len - 1;
+                    }
+                }
+            }
 
             _ = win32.InvalidateRect(win, null, win32.TRUE);
         }
