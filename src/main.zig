@@ -189,15 +189,15 @@ const FileInfo = struct {
     }
 };
 
-const extensions = L("*.bmp;*.png;*.jpg;*.jpeg;*.tiff");
-
 const app = struct {
     const Command = enum(u32) {
         Open = 1,
     };
 
+    const extensions = L("*.bmp;*.png;*.jpg;*.jpeg;*.tiff");
+
     var image: ?*gdip.Image = null;
-    var dir_buffer: [1024:0]u16 = undefined;
+    var dir_buffer: [256:0]u16 = undefined;
     var dir_len: usize = 0;
     var files: List(FileInfo) = undefined;
     var file_index: usize = 0;
@@ -238,7 +238,11 @@ const app = struct {
 
         // Create window
         const menu = try win32.createMenu();
-        try win32.appendMenu(menu, .{ .String = .{ .id = @enumToInt(Command.Open), .str = L("Open") } }, 0);
+        try win32.appendMenu(
+            menu,
+            .{ .String = .{ .id = @enumToInt(Command.Open), .str = L("Open") } },
+            0,
+        );
 
         const win_flags = win32.WS_OVERLAPPEDWINDOW;
         const win = try win32.createWindowExW(
@@ -502,14 +506,35 @@ const gdip = struct {
         input: *const GdiplusStartupInput,
         output: *GdiplusStartupOutput,
     ) callconv(WINGDIPAPI) Status;
+
     const GdiplusShutdown = fn (token: win32.ULONG_PTR) callconv(WINGDIPAPI) Status;
-    const GdipCreateBitmapFromFile = fn (filename: win32.LPCWSTR, image: **Image) callconv(WINGDIPAPI) Status;
-    const GdipCreateBitmapFromStream = fn (stream: *win32.IStream, image: **Image) callconv(WINGDIPAPI) Status;
+
+    const GdipCreateBitmapFromFile = fn (
+        filename: win32.LPCWSTR,
+        image: **Image,
+    ) callconv(WINGDIPAPI) Status;
+
+    const GdipCreateBitmapFromStream = fn (
+        stream: *win32.IStream,
+        image: **Image,
+    ) callconv(WINGDIPAPI) Status;
+
     const GdipDisposeImage = fn (image: *Image) callconv(WINGDIPAPI) Status;
-    const GdipGetImageDimension = fn (image: *Image, width: *f32, height: *f32) callconv(WINGDIPAPI) Status;
-    const GdipCreateFromHDC = fn (hdc: win32.HDC, graphics: **Graphics) callconv(WINGDIPAPI) Status;
+
+    const GdipGetImageDimension = fn (
+        image: *Image,
+        width: *f32,
+        height: *f32,
+    ) callconv(WINGDIPAPI) Status;
+
+    const GdipCreateFromHDC = fn (
+        hdc: win32.HDC,
+        graphics: **Graphics,
+    ) callconv(WINGDIPAPI) Status;
+
     const GdipDeleteGraphics = fn (graphics: *Graphics) callconv(WINGDIPAPI) Status;
     const GdipGraphicsClear = fn (graphics: *Graphics, color: u32) callconv(WINGDIPAPI) Status;
+
     const GdipDrawImageRect = fn (
         graphics: *Graphics,
         image: *Image,
@@ -518,7 +543,11 @@ const gdip = struct {
         width: f32,
         height: f32,
     ) callconv(WINGDIPAPI) Status;
-    const GdipSetInterpolationMode = fn (graphics: *Graphics, mode: InterpolationMode) callconv(WINGDIPAPI) Status;
+
+    const GdipSetInterpolationMode = fn (
+        graphics: *Graphics,
+        mode: InterpolationMode,
+    ) callconv(WINGDIPAPI) Status;
 
     var dll: win32.HMODULE = undefined;
     var token: win32.ULONG_PTR = 0;
