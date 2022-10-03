@@ -144,11 +144,13 @@ const FileInfo = struct {
         std.mem.copy(u16, self.buf[0..self.len], file_name[0..self.len]);
         assert(self.buf[self.len - 1] != 0);
 
+        self.buf[self.len] = 0;
+
         return self;
     }
 
-    fn name(self: FileInfo) []const u16 {
-        return self.buf[0..self.len];
+    fn name(self: FileInfo) [:0]const u16 {
+        return self.buf[0..self.len :0];
     }
 
     fn supported(self: FileInfo) !bool {
@@ -176,8 +178,6 @@ const app = struct {
     const Command = enum(u32) {
         Open = 1,
     };
-
-    const extensions = L("*.bmp;*.png;*.jpg;*.jpeg;*.tiff");
 
     var image: ?*gdip.Image = null;
     var dir_buffer: [256:0]u16 = undefined;
@@ -252,7 +252,14 @@ const app = struct {
             defer win32.freeArgs(args);
             if (args.len > 1) {
                 const filename = args[1][0..std.mem.len(args[1]) :0];
+                std.mem.copy(u16, dir_buffer[0..], filename);
+
+                dir_len = std.mem.lastIndexOfScalar(u16, filename, '\\') orelse return error.InvalidPath;
+                // Account for the final separator
+                dir_len += 1;
+
                 try load(win, filename);
+                try updateFiles();
             }
         }
 
@@ -413,20 +420,19 @@ const app = struct {
 
         if (try win32.getOpenFileName(&ofn)) {
             const path = dir_buffer[0..std.mem.len(&dir_buffer) :0];
+            dir_len = std.mem.lastIndexOfScalar(u16, path, '\\') orelse return error.InvalidPath;
+            // Account for the final separator
+            dir_len += 1;
             try load(win, path);
-            try updateFiles(path);
+            try updateFiles();
         }
     }
 
-    fn updateFiles(path: [:0]u16) !void {
-        dir_len = std.mem.lastIndexOfScalar(u16, path, '\\') orelse return error.InvalidPath;
-
-        // Account for the final separator
-        dir_len += 1;
+    fn updateFiles() !void {
 
         // Split path in file and directory names
-        const dirname = path[0..dir_len];
-        const filename = path[dir_len.. :0];
+        const dirname = dir_buffer[0..dir_len];
+        const filename = dir_buffer[dir_len.. :0];
 
         // Copy directory name in find pattern
         var pattern: [1024]u16 = undefined;
@@ -450,13 +456,9 @@ const app = struct {
             if (data.dwFileAttributes & win32.FILE_ATTRIBUTE_DIRECTORY == 0) {
                 const file = FileInfo.init(&data.cFileName);
 
-                _ = filename;
                 if (try file.supported()) {
                     try files.add(file);
-
-                    if (std.mem.eql(u16, file.name(), filename)) {
-                        file_index = files.items.len - 1;
-                    }
+                    if (std.mem.eql(u16, file.name(), filename)) file_index = files.items.len - 1;
                 }
             }
 
