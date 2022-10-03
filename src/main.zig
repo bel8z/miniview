@@ -253,10 +253,8 @@ const app = struct {
             if (args.len > 1) {
                 const filename = args[1][0..std.mem.len(args[1]) :0];
                 std.mem.copy(u16, dir_buffer[0..], filename);
-
                 dir_len = std.mem.lastIndexOfScalar(u16, filename, '\\') orelse return error.InvalidPath;
-                // Account for the final separator
-                dir_len += 1;
+                dir_len += 1; // Account for the final separator
 
                 try load(win, filename);
                 try updateFiles();
@@ -421,15 +419,13 @@ const app = struct {
         if (try win32.getOpenFileName(&ofn)) {
             const path = dir_buffer[0..std.mem.len(&dir_buffer) :0];
             dir_len = std.mem.lastIndexOfScalar(u16, path, '\\') orelse return error.InvalidPath;
-            // Account for the final separator
-            dir_len += 1;
+            dir_len += 1; // Account for the final separator
             try load(win, path);
             try updateFiles();
         }
     }
 
     fn updateFiles() !void {
-
         // Split path in file and directory names
         const dirname = dir_buffer[0..dir_len];
         const filename = dir_buffer[dir_len.. :0];
