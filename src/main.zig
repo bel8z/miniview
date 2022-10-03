@@ -240,6 +240,16 @@ const app = struct {
         _ = win32.showWindow(win, win32.SW_SHOWDEFAULT);
         try win32.updateWindow(win);
 
+        // Handle command line
+        {
+            const args = win32.getArgs();
+            defer win32.freeArgs(args);
+            if (args.len > 1) {
+                const filename = args[1][0..std.mem.len(args[1]) :0];
+                try load(win, filename);
+            }
+        }
+
         // Main loop
         defer disposeImage() catch unreachable;
 
@@ -367,22 +377,24 @@ const app = struct {
 
     fn load(win: win32.HWND, file_name: [:0]u16) gdip.Error!void {
         var new_image: *gdip.Image = undefined;
-        try gdip.checkStatus(gdip.createImageFromFile(file_name, &new_image));
+        if (gdip.createImageFromFile(file_name, &new_image) != 0) {
+            try invalidFile(win, file_name);
+        } else {
+            try disposeImage();
+            image = new_image;
 
-        try disposeImage();
-        image = new_image;
+            if (win32.InvalidateRect(win, null, win32.TRUE) == 0) return error.Unexpected;
 
-        if (win32.InvalidateRect(win, null, win32.TRUE) == 0) return error.Win32Error;
+            const buf = std.mem.bytesAsSlice(u16, &temp_buffer);
+            const sep = L(" - ");
+            std.mem.copy(u16, buf[0..], app_name);
+            std.mem.copy(u16, buf[app_name.len..], sep);
+            std.mem.copy(u16, buf[app_name.len + sep.len ..], file_name);
+            buf[app_name.len + sep.len + file_name.len] = 0;
+            const title = buf[0 .. app_name.len + sep.len + file_name.len :0];
 
-        const buf = std.mem.bytesAsSlice(u16, &temp_buffer);
-        const sep = L(" - ");
-        std.mem.copy(u16, buf[0..], app_name);
-        std.mem.copy(u16, buf[app_name.len..], sep);
-        std.mem.copy(u16, buf[app_name.len + sep.len ..], file_name);
-        buf[app_name.len + sep.len + file_name.len] = 0;
-        const title = buf[0 .. app_name.len + sep.len + file_name.len :0];
-
-        if (win32.SetWindowTextW(win, title) == 0) return error.Win32Error;
+            if (win32.SetWindowTextW(win, title) == 0) return error.Unexpected;
+        }
     }
 
     fn open(win: win32.HWND) !void {
@@ -426,7 +438,7 @@ const app = struct {
         var data: win32.WIN32_FIND_DATAW = undefined;
         const find_str = pattern[0..pattern_len :0];
         const find = win32.kernel32.FindFirstFileW(find_str, &data);
-        if (find == win32.INVALID_HANDLE_VALUE) return error.Win32Error;
+        if (find == win32.INVALID_HANDLE_VALUE) return error.Unexpected;
 
         while (true) {
             if (data.dwFileAttributes & win32.FILE_ATTRIBUTE_DIRECTORY == 0) {
@@ -450,6 +462,18 @@ const app = struct {
         if (image) |old_img| {
             try gdip.checkStatus(gdip.disposeImage(old_img));
         }
+    }
+
+    fn invalidFile(win: win32.HWND, file_name: [:0]u16) gdip.Error!void {
+        const buf = std.mem.bytesAsSlice(u16, &temp_buffer);
+
+        const base = L("Invalid image file: ");
+        std.mem.copy(u16, buf[0..], base);
+        std.mem.copy(u16, buf[base.len..], file_name);
+        buf[base.len + file_name.len] = 0;
+
+        const msg = buf[0 .. base.len + file_name.len :0];
+        _ = try win32.messageBoxW(win, msg, app_name, 0);
     }
 };
 
@@ -551,7 +575,7 @@ const gdip = struct {
     var setInterpolationMode: GdipSetInterpolationMode = undefined;
 
     pub fn init() Error!void {
-        dll = win32.kernel32.LoadLibraryW(L("Gdiplus")) orelse return error.Win32Error;
+        dll = win32.kernel32.LoadLibraryW(L("Gdiplus")) orelse return error.Unexpected;
         shutdown = try win32.loadProc(GdiplusShutdown, "GdiplusShutdown", dll);
         createImageFromFile = try win32.loadProc(GdipCreateBitmapFromFile, "GdipCreateBitmapFromFile", dll);
         createImageFromStream = try win32.loadProc(GdipCreateBitmapFromStream, "GdipCreateBitmapFromStream", dll);
@@ -584,7 +608,7 @@ const gdip = struct {
             4 => return error.ObjectBusy,
             5 => return error.InsufficientBuffer,
             6 => return error.NotImplemented,
-            7 => return error.Win32Error,
+            7 => return error.Unexpected,
             8 => return error.WrongState,
             9 => return error.Aborted,
             10 => return error.FileNotFound,
@@ -599,7 +623,7 @@ const gdip = struct {
             19 => return error.PropertyNotFound,
             20 => return error.PropertyNotSupported,
             21 => return error.ProfileNotFound,
-            else => return error.Win32Error,
+            else => return error.Unexpected,
         }
     }
 };

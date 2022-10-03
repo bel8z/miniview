@@ -22,13 +22,31 @@ pub fn getCurrentInstance() win32.HINSTANCE {
 
 pub inline fn loadProc(comptime T: type, comptime name: [*:0]const u8, handle: win32.HMODULE) Error!T {
     return @ptrCast(T, win32.kernel32.GetProcAddress(handle, name) orelse
-        return error.Win32Error);
+        return error.Unexpected);
 }
 
 pub extern "user32" fn SetWindowTextW(
     hWnd: win32.HWND,
     lpString: win32.LPCWSTR,
 ) callconv(win32.WINAPI) win32.BOOL;
+
+//=== Command line ===//
+
+pub fn getArgs() []win32.LPWSTR {
+    const cmd_line = win32.kernel32.GetCommandLineW();
+    var argc: c_int = undefined;
+    const argv = CommandLineToArgvW(cmd_line, &argc);
+    return argv[0..@intCast(usize, argc)];
+}
+
+pub fn freeArgs(args: []win32.LPWSTR) void {
+    win32.LocalFree(@ptrCast(win32.HLOCAL, args.ptr));
+}
+
+extern "shell32" fn CommandLineToArgvW(
+    lpCmdLine: win32.LPCWSTR,
+    pNumArgs: *c_int,
+) callconv(win32.WINAPI) [*c]win32.LPWSTR;
 
 //=== UTF16 string comparison ===//
 
@@ -49,7 +67,7 @@ pub inline fn compareStringOrdinal(
         1 => .lt,
         2 => .eq,
         3 => .gt,
-        else => error.Win32Error,
+        else => error.Unexpected,
     };
 }
 
@@ -63,7 +81,7 @@ extern "kernel32" fn CompareStringOrdinal(
 
 //=== Error handling ===//
 
-pub const Error = error{Win32Error};
+pub const Error = error{Unexpected};
 
 pub extern "kernel32" fn GetLastError() callconv(win32.WINAPI) u32;
 pub extern "kernel32" fn SetLastError(dwErrCode: u32) callconv(win32.WINAPI) void;
@@ -83,7 +101,7 @@ pub fn formatError(err: u32, buffer: []u8) ![]u8 {
         null,
     );
 
-    if (len == 0) return error.Win32Error;
+    if (len == 0) return error.Unexpected;
 
     return buffer[0..try std.unicode.utf16leToUtf8(buffer, wbuffer[0..len])];
 }
@@ -126,7 +144,7 @@ pub fn getDefaultCursor() win32.HCURSOR {
 
 pub fn getStandardCursor(id: CursorId) Error!win32.HCURSOR {
     const name = @intToPtr(win32.LPCWSTR, @enumToInt(id));
-    return LoadCursorW(null, name) orelse error.Win32Error;
+    return LoadCursorW(null, name) orelse error.Unexpected;
 }
 
 extern "user32" fn LoadCursorW(
@@ -156,7 +174,7 @@ pub const MenuItem = union(enum) {
 };
 
 pub fn createMenu() Error!win32.HMENU {
-    return CreateMenu() orelse error.Win32Error;
+    return CreateMenu() orelse error.Unexpected;
 }
 
 pub fn appendMenu(menu: win32.HMENU, item: MenuItem, flags: u32) Error!void {
@@ -167,7 +185,7 @@ pub fn appendMenu(menu: win32.HMENU, item: MenuItem, flags: u32) Error!void {
         .OwnerDraw => |x| AppendMenuW(menu, flags, menuIdToPtr(x.id), x.data),
     };
 
-    if (res != win32.TRUE) return error.Win32Error;
+    if (res != win32.TRUE) return error.Unexpected;
 }
 
 inline fn menuIdToPtr(id: u32) *const anyopaque {
@@ -205,7 +223,7 @@ pub const PaintBuffer = struct {
         const hr = BufferedPaintClear(self.pb, &rect);
         if (hr != 0) {
             SetLastError(@intCast(u32, hr));
-            return error.Win32Error;
+            return error.Unexpected;
         }
     }
 };
@@ -214,7 +232,7 @@ pub inline fn initBufferedPaint() Error!void {
     const hr = BufferedPaintInit();
     if (hr != 0) {
         SetLastError(@intCast(u32, hr));
-        return error.Win32Error;
+        return error.Unexpected;
     }
 }
 
@@ -239,14 +257,14 @@ pub inline fn beginBufferedPaint(
         }
     }
 
-    return error.Win32Error;
+    return error.Unexpected;
 }
 
 pub inline fn endBufferedPaint(win: win32.HWND, pb: PaintBuffer) Error!void {
     const hr = EndBufferedPaint(pb.pb, win32.TRUE);
     if (hr != 0) {
         SetLastError(@intCast(u32, hr));
-        return error.Win32Error;
+        return error.Unexpected;
     }
 
     if (EndPaint(win, &pb.ps) != win32.TRUE) unreachable;
@@ -343,7 +361,7 @@ pub fn getOpenFileName(ofn: *OPENFILENAMEW) Error!bool {
     if (err == 0) return false;
 
     // TODO (Matteo): Translate errors
-    return error.Win32Error;
+    return error.Unexpected;
 }
 
 extern "comdlg32" fn GetOpenFileNameW(ofn: *OPENFILENAMEW) callconv(win32.WINAPI) win32.BOOL;
@@ -404,7 +422,7 @@ pub fn createMemStream(mem: []const u8) !*IStream {
     return SHCreateMemStream(
         mem.ptr,
         @intCast(win32.UINT, mem.len),
-    ) orelse error.Win32Error;
+    ) orelse error.Unexpected;
 }
 
 extern "shlwapi" fn SHCreateMemStream(pInit: [*]const u8, cbInit: win32.UINT) ?*IStream;
