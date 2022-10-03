@@ -25,6 +25,35 @@ pub inline fn loadProc(comptime T: type, comptime name: [*:0]const u8, handle: w
         return error.Win32Error);
 }
 
+pub inline fn compareStringOrdinal(
+    string1: []const u16,
+    string2: []const u16,
+    ignore_case: bool,
+) !std.math.Order {
+    const cmp = CompareStringOrdinal(
+        string1.ptr,
+        @intCast(c_int, string1.len),
+        string2.ptr,
+        @intCast(c_int, string2.len),
+        @boolToInt(ignore_case),
+    );
+
+    return switch (cmp) {
+        1 => .lt,
+        2 => .eq,
+        3 => .gt,
+        else => error.Win32Error,
+    };
+}
+
+extern "kernel32" fn CompareStringOrdinal(
+    lpString1: [*]const u16,
+    cchCount1: c_int,
+    lpString2: [*]const u16,
+    cchCount2: c_int,
+    bIgnoreCase: win32.BOOL,
+) c_int;
+
 //=== Error handling ===//
 
 pub const Error = error{Win32Error};

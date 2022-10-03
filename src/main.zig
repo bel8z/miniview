@@ -129,63 +129,44 @@ fn List(comptime T: type) type {
     };
 }
 
-const FileIter = struct {
-    find: win32.HANDLE = undefined,
-    pattern: [1024]u16 = undefined,
-    data: win32.WIN32_FIND_DATAW = undefined,
-
-    fn init(path: []const u16) !FileIter {
-        var self = FileIter{};
-        if (path.len > self.pattern.len - 16) return error.PathTooLong;
-
-        std.mem.copy(u16, self.pattern[0..], path);
-
-        var len = path.len - 1;
-        if (path[len] != '\\') len += 1;
-
-        const suffix = L("\\*");
-        std.mem.copy(u16, self.pattern[len..], suffix[0..]);
-        len += suffix.len;
-        self.pattern[len] = 0;
-
-        const pattern_str = self.pattern[0..len :0];
-
-        self.find = win32.kernel32.FindFirstFileW(pattern_str, &self.data);
-        if (self.find != win32.INVALID_HANDLE_VALUE) return self;
-
-        return error.Win32Error;
-    }
-
-    fn next(self: *FileIter) ?[:0]const u16 {
-        while (true) {
-            if (win32.kernel32.FindNextFileW(self.find, &self.data) == win32.FALSE) {
-                return null;
-            }
-
-            if (self.data.dwFileAttributes & win32.FILE_ATTRIBUTE_DIRECTORY == 0) {
-                const len = std.mem.indexOfScalar(u16, self.data.cFileName[0..], 0) orelse unreachable;
-                return self.data.cFileName[0..len :0];
-            }
-        }
-    }
-};
-
 const FileInfo = struct {
-    buf: [128]u16,
+    buf: [win32.MAX_PATH]u16,
     len: usize,
 
-    fn init(file_name: []const u16) FileInfo {
+    fn init(file_name: *const [win32.MAX_PATH]u16) FileInfo {
         var self: FileInfo = undefined;
 
-        self.len = file_name.len;
+        self.len = std.mem.indexOfScalar(u16, file_name, 0) orelse unreachable;
         assert(self.len <= self.buf.len);
 
-        std.mem.copy(u16, self.buf[0..self.len], file_name);
+        std.mem.copy(u16, self.buf[0..self.len], file_name[0..self.len]);
+        assert(self.buf[self.len - 1] != 0);
+
         return self;
     }
 
     fn name(self: FileInfo) []const u16 {
         return self.buf[0..self.len];
+    }
+
+    fn supported(self: FileInfo) !bool {
+        const dot = std.mem.lastIndexOfScalar(u16, self.buf[0..self.len], '.') orelse return false;
+        const ext = self.buf[dot..self.len];
+
+        if (ext.len == 0) return false;
+
+        assert(ext[ext.len - 1] != 0);
+
+        // TODO (Matteo): Store tokens at startup
+        var tokens = std.mem.tokenize(u16, extensions, L(";*"));
+        while (tokens.next()) |token| {
+            if (token.len == ext.len) {
+                const cmp = try win32.compareStringOrdinal(ext, token, true);
+                if (cmp == .eq) return true;
+            }
+        }
+
+        return false;
     }
 };
 
@@ -405,27 +386,56 @@ const app = struct {
             try disposeImage();
             image = new_image;
 
-            dir_len = std.mem.lastIndexOfScalar(u16, &dir_buffer, '\\') orelse unreachable;
-            dir_len += 1;
+            const path = dir_buffer[0..std.mem.len(&dir_buffer) :0];
+            try updateFiles(path);
 
-            const filename = dir_buffer[dir_len.. :0];
+            _ = win32.InvalidateRect(win, null, win32.TRUE);
+        }
+    }
 
-            var iter = try FileIter.init(dir_buffer[0..dir_len]);
-            while (iter.next()) |file| {
-                const dot = std.mem.lastIndexOfScalar(u16, file, '.') orelse continue;
-                const ext = file[dot..];
-                if (ext.len == 0) continue;
+    fn updateFiles(path: [:0]u16) !void {
+        dir_len = std.mem.lastIndexOfScalar(u16, path, '\\') orelse return error.InvalidPath;
 
-                if (std.mem.indexOf(u16, extensions, ext)) |_| {
-                    try files.add(FileInfo.init(file));
+        // Account for the final separator
+        dir_len += 1;
 
-                    if (std.mem.eql(u16, file, filename)) {
+        // Split path in file and directory names
+        const dirname = path[0..dir_len];
+        const filename = path[dir_len.. :0];
+
+        // Copy directory name in find pattern
+        var pattern: [1024]u16 = undefined;
+        if (dirname.len > pattern.len - 16) return error.PathTooLong;
+        assert(dirname[dir_len - 1] == '\\');
+        std.mem.copy(u16, pattern[0..], dirname);
+
+        // Append wildcard to pattern and null terminate
+        const suffix = L("\\*");
+        const pattern_len = dir_len + suffix.len;
+        std.mem.copy(u16, pattern[dir_len..], suffix[0..]);
+        pattern[pattern_len] = 0;
+
+        // Iterate
+        var data: win32.WIN32_FIND_DATAW = undefined;
+        const find_str = pattern[0..pattern_len :0];
+        const find = win32.kernel32.FindFirstFileW(find_str, &data);
+        if (find == win32.INVALID_HANDLE_VALUE) return error.Win32Error;
+
+        while (true) {
+            if (data.dwFileAttributes & win32.FILE_ATTRIBUTE_DIRECTORY == 0) {
+                const file = FileInfo.init(&data.cFileName);
+
+                _ = filename;
+                if (try file.supported()) {
+                    try files.add(file);
+
+                    if (std.mem.eql(u16, file.name(), filename)) {
                         file_index = files.items.len - 1;
                     }
                 }
             }
 
-            _ = win32.InvalidateRect(win, null, win32.TRUE);
+            if (win32.kernel32.FindNextFileW(find, &data) == win32.FALSE) break;
         }
     }
 
@@ -586,29 +596,3 @@ const gdip = struct {
         }
     }
 };
-
-//=== Testing ===//
-
-test "File iterator" {
-    var path_ptr: [*:0]u16 = undefined;
-
-    const hr = win32.shell32.SHGetKnownFolderPath(
-        &win32.FOLDERID_LocalAppData,
-        0,
-        null,
-        &path_ptr,
-    );
-
-    if (hr != 0) {
-        std.log.err("SHGetKnownFolderPath returned {x}", .{hr});
-        return error.Win32Error;
-    }
-
-    _ = try win32.messageBoxW(null, path_ptr, L("Path"), 0);
-
-    var iter = try FileIter.init(path_ptr[0..std.mem.len(path_ptr)]);
-
-    while (iter.next()) |path16| {
-        _ = try win32.messageBoxW(null, path16, L("Files"), 0);
-    }
-}
