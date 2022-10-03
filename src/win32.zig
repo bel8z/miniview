@@ -25,6 +25,13 @@ pub inline fn loadProc(comptime T: type, comptime name: [*:0]const u8, handle: w
         return error.Win32Error);
 }
 
+pub extern "user32" fn SetWindowTextW(
+    hWnd: win32.HWND,
+    lpString: win32.LPCWSTR,
+) callconv(win32.WINAPI) win32.BOOL;
+
+//=== UTF16 string comparison ===//
+
 pub inline fn compareStringOrdinal(
     string1: []const u16,
     string2: []const u16,
@@ -52,7 +59,7 @@ extern "kernel32" fn CompareStringOrdinal(
     lpString2: [*]const u16,
     cchCount2: c_int,
     bIgnoreCase: win32.BOOL,
-) c_int;
+) callconv(win32.WINAPI) c_int;
 
 //=== Error handling ===//
 

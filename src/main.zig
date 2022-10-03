@@ -10,7 +10,7 @@ const app_name = L("MiniView");
 //=== Infrastructure ===//
 
 // NOTE (Matteo): Kept static to allow for growing it without risk of smashing the stack
-var panic_buffer: [4096]u8 = undefined;
+var temp_buffer: [8192]u8 align(@alignOf(usize)) = undefined;
 
 pub fn main() void {
     // NOTE (Matteo): Errors are not returned from main in order to call our
@@ -22,7 +22,7 @@ pub fn panic(err: []const u8, maybe_trace: ?*std.builtin.StackTrace) noreturn {
     // NOTE (Matteo): Custom panic handler that reports the error via message box
     // This is because win32 apps don't have an associated console by default,
     // so stderr "is not visible".
-    var stream = std.io.fixedBufferStream(&panic_buffer);
+    var stream = std.io.fixedBufferStream(&temp_buffer);
     var w = stream.writer();
 
     w.print("{s}", .{err}) catch unreachable;
@@ -44,7 +44,7 @@ pub fn panic(err: []const u8, maybe_trace: ?*std.builtin.StackTrace) noreturn {
     // Win32 a lot of UTF8<->UTF16 conversions are involved; maybe we can mitigate
     // this a bit by fully embracing Win32 and UTF16.
     var alloc = std.heap.FixedBufferAllocator.init(
-        panic_buffer[stream.getPos() catch unreachable ..],
+        temp_buffer[stream.getPos() catch unreachable ..],
     );
     _ = win32.messageBoxW(
         null,
@@ -61,6 +61,8 @@ pub fn panic(err: []const u8, maybe_trace: ?*std.builtin.StackTrace) noreturn {
 }
 
 //=== Actual application ===//
+
+const extensions = L("*.bmp;*.png;*.jpg;*.jpeg;*.tiff");
 
 fn List(comptime T: type) type {
     return struct {
@@ -169,8 +171,6 @@ const FileInfo = struct {
         return false;
     }
 };
-
-const extensions = L("*.bmp;*.png;*.jpg;*.jpeg;*.tiff");
 
 const app = struct {
     const Command = enum(u32) {
@@ -314,13 +314,7 @@ const app = struct {
 
                     const full_name = dir_buffer[0..full_len :0];
 
-                    var new_image: *gdip.Image = undefined;
-                    try gdip.checkStatus(gdip.createImageFromFile(full_name, &new_image));
-
-                    try disposeImage();
-                    image = new_image;
-
-                    _ = win32.InvalidateRect(win, null, win32.TRUE);
+                    try load(win, full_name);
                 }
             },
             else => return false,
@@ -371,6 +365,26 @@ const app = struct {
         }
     }
 
+    fn load(win: win32.HWND, file_name: [:0]u16) gdip.Error!void {
+        var new_image: *gdip.Image = undefined;
+        try gdip.checkStatus(gdip.createImageFromFile(file_name, &new_image));
+
+        try disposeImage();
+        image = new_image;
+
+        if (win32.InvalidateRect(win, null, win32.TRUE) == 0) return error.Win32Error;
+
+        const buf = std.mem.bytesAsSlice(u16, &temp_buffer);
+        const sep = L(" - ");
+        std.mem.copy(u16, buf[0..], app_name);
+        std.mem.copy(u16, buf[app_name.len..], sep);
+        std.mem.copy(u16, buf[app_name.len + sep.len ..], file_name);
+        buf[app_name.len + sep.len + file_name.len] = 0;
+        const title = buf[0 .. app_name.len + sep.len + file_name.len :0];
+
+        if (win32.SetWindowTextW(win, title) == 0) return error.Win32Error;
+    }
+
     fn open(win: win32.HWND) !void {
         var ofn = win32.OPENFILENAMEW{
             .hwndOwner = win,
@@ -380,16 +394,9 @@ const app = struct {
         };
 
         if (try win32.getOpenFileName(&ofn)) {
-            var new_image: *gdip.Image = undefined;
-            try gdip.checkStatus(gdip.createImageFromFile(&dir_buffer, &new_image));
-
-            try disposeImage();
-            image = new_image;
-
             const path = dir_buffer[0..std.mem.len(&dir_buffer) :0];
+            try load(win, path);
             try updateFiles(path);
-
-            _ = win32.InvalidateRect(win, null, win32.TRUE);
         }
     }
 
