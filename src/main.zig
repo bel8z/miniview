@@ -10,7 +10,21 @@ const app_name = L("MiniView");
 //=== Infrastructure ===//
 
 // NOTE (Matteo): Kept static to allow for growing it without risk of smashing the stack
-var temp_buffer: [8192]u8 align(@alignOf(usize)) = undefined;
+var _temp_buffer: [8192]u8 align(@alignOf(usize)) = undefined;
+
+fn TempBuf(comptime T: type) type {
+    return std.fifo.LinearFifo(T, .Slice);
+}
+
+fn getTempBuf(comptime T: type) TempBuf(T) {
+    return TempBuf(T).init(std.mem.bytesAsSlice(T, &_temp_buffer));
+}
+
+fn getWStr(buf: *TempBuf(u16)) [:0]const u16 {
+    buf.writeItem(0) catch unreachable;
+    const s = buf.readableSlice(0);
+    return s[0 .. s.len - 1 :0];
+}
 
 pub fn main() void {
     // NOTE (Matteo): Errors are not returned from main in order to call our
@@ -22,7 +36,7 @@ pub fn panic(err: []const u8, maybe_trace: ?*std.builtin.StackTrace) noreturn {
     // NOTE (Matteo): Custom panic handler that reports the error via message box
     // This is because win32 apps don't have an associated console by default,
     // so stderr "is not visible".
-    var stream = std.io.fixedBufferStream(&temp_buffer);
+    var stream = getTempBuf(u8);
     var w = stream.writer();
 
     w.print("{s}", .{err}) catch unreachable;
@@ -43,12 +57,10 @@ pub fn panic(err: []const u8, maybe_trace: ?*std.builtin.StackTrace) noreturn {
     // TODO (Matteo): When text is going back and forth between Zig's stdlib and
     // Win32 a lot of UTF8<->UTF16 conversions are involved; maybe we can mitigate
     // this a bit by fully embracing Win32 and UTF16.
-    var alloc = std.heap.FixedBufferAllocator.init(
-        temp_buffer[stream.getPos() catch unreachable ..],
-    );
+    var alloc = std.heap.FixedBufferAllocator.init(stream.writableSlice(0));
     _ = win32.messageBoxW(
         null,
-        std.unicode.utf8ToUtf16LeWithNull(alloc.allocator(), stream.getWritten()) catch unreachable,
+        std.unicode.utf8ToUtf16LeWithNull(alloc.allocator(), stream.readableSlice(0)) catch unreachable,
         app_name,
         win32.MB_ICONERROR | win32.MB_OK,
     ) catch unreachable;
@@ -386,7 +398,7 @@ const app = struct {
         }
     }
 
-    fn load(win: win32.HWND, file_name: [:0]u16) gdip.Error!void {
+    fn load(win: win32.HWND, file_name: [:0]u16) !void {
         var new_image: *gdip.Image = undefined;
         if (gdip.createImageFromFile(file_name, &new_image) != 0) {
             try invalidFile(win, file_name);
@@ -396,13 +408,11 @@ const app = struct {
 
             if (win32.InvalidateRect(win, null, win32.TRUE) == 0) return error.Unexpected;
 
-            const buf = std.mem.bytesAsSlice(u16, &temp_buffer);
-            const sep = L(" - ");
-            std.mem.copy(u16, buf[0..], app_name);
-            std.mem.copy(u16, buf[app_name.len..], sep);
-            std.mem.copy(u16, buf[app_name.len + sep.len ..], file_name);
-            buf[app_name.len + sep.len + file_name.len] = 0;
-            const title = buf[0 .. app_name.len + sep.len + file_name.len :0];
+            var buf = getTempBuf(u16);
+            try buf.write(app_name);
+            try buf.write(L(" - "));
+            try buf.write(file_name);
+            const title = getWStr(&buf);
 
             if (win32.SetWindowTextW(win, title) == 0) return error.Unexpected;
         }
@@ -469,14 +479,10 @@ const app = struct {
     }
 
     fn invalidFile(win: win32.HWND, file_name: [:0]u16) gdip.Error!void {
-        const buf = std.mem.bytesAsSlice(u16, &temp_buffer);
-
-        const base = L("Invalid image file: ");
-        std.mem.copy(u16, buf[0..], base);
-        std.mem.copy(u16, buf[base.len..], file_name);
-        buf[base.len + file_name.len] = 0;
-
-        const msg = buf[0 .. base.len + file_name.len :0];
+        var buf = getTempBuf(u16);
+        try buf.write(L("Invalid image file: "));
+        try buf.write(file_name);
+        const msg = getWStr(&buf);
         _ = try win32.messageBoxW(win, msg, app_name, 0);
     }
 };
