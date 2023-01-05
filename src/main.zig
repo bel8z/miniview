@@ -15,38 +15,41 @@ pub fn main() void {
     app.main() catch unreachable;
 }
 
-pub fn panic(err: []const u8, maybe_trace: ?*std.builtin.StackTrace) noreturn {
+pub fn panic(err: []const u8, maybe_trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
     // NOTE (Matteo): Custom panic handler that reports the error via message box
     // This is because win32 apps don't have an associated console by default,
     // so stderr "is not visible".
-    var stream = getTempBuf(u8);
-    var w = stream.writer();
+    var buf = getTempBuf(u8);
 
-    w.print("{s}", .{err}) catch unreachable;
+    {
+        var writer = buf.writer();
+        writer.print("{s}", .{err}) catch unreachable;
 
-    const win_err = win32.GetLastError();
-    if (win_err != 0) {
-        var buf_utf8: [win32.ERROR_SIZE]u8 = undefined;
-        w.print("\n\nGetLastError() =  {x}: {s}", .{
-            win_err,
-            win32.formatError(win_err, &buf_utf8) catch unreachable,
-        }) catch unreachable;
-    }
+        const win_err = win32.GetLastError();
+        if (win_err != 0) {
+            var buf_utf8: [win32.ERROR_SIZE]u8 = undefined;
+            writer.print("\n\nGetLastError() =  {x}: {s}", .{
+                win_err,
+                win32.formatError(win_err, &buf_utf8) catch unreachable,
+            }) catch unreachable;
+        }
 
-    if (maybe_trace) |trace| {
-        w.print("\n{}", .{trace}) catch unreachable;
+        if (maybe_trace) |trace| writer.print("\n{}", .{trace}) catch unreachable;
     }
 
     // TODO (Matteo): When text is going back and forth between Zig's stdlib and
     // Win32 a lot of UTF8<->UTF16 conversions are involved; maybe we can mitigate
     // this a bit by fully embracing Win32 and UTF16.
-    var alloc = std.heap.FixedBufferAllocator.init(stream.writableSlice(0));
-    _ = win32.messageBoxW(
+    var alloc = std.heap.FixedBufferAllocator.init(buf.writableSlice(0));
+    _ = win32.messageBox(
         null,
-        std.unicode.utf8ToUtf16LeWithNull(alloc.allocator(), stream.readableSlice(0)) catch unreachable,
+        std.unicode.utf8ToUtf16LeWithNull(alloc.allocator(), buf.readableSlice(0)) catch unreachable,
         app_name,
         win32.MB_ICONERROR | win32.MB_OK,
     ) catch unreachable;
+
+    // TODO (Matteo): Use ret_addr for better diagnostics
+    _ = ret_addr;
 
     // Spinning required because the function is 'noreturn'
     while (builtin.mode == .Debug) @breakpoint();
@@ -60,7 +63,11 @@ fn TempBuf(comptime T: type) type {
 }
 
 fn getTempBuf(comptime T: type) TempBuf(T) {
-    return TempBuf(T).init(std.mem.bytesAsSlice(T, &_temp_buffer));
+    const static = struct {
+        // NOTE (Matteo): Kept static to allow for growing it without risk of smashing the stack
+        var buf: [8192]u8 align(@alignOf(usize)) = undefined;
+    };
+    return TempBuf(T).init(std.mem.bytesAsSlice(T, &static.buf));
 }
 
 fn getWStr(buf: *TempBuf(u16)) [:0]const u16 {
@@ -68,9 +75,6 @@ fn getWStr(buf: *TempBuf(u16)) [:0]const u16 {
     const s = buf.readableSlice(0);
     return s[0 .. s.len - 1 :0];
 }
-
-// NOTE (Matteo): Kept static to allow for growing it without risk of smashing the stack
-var _temp_buffer: [8192]u8 align(@alignOf(usize)) = undefined;
 
 //=== Actual application ===//
 
@@ -318,7 +322,7 @@ const app = struct {
             .lpszMenuName = null,
         };
 
-        _ = try win32.registerClassExW(&win_class);
+        _ = try win32.registerClassEx(&win_class);
 
         // Init buffered painting
         try win32.initBufferedPaint();
@@ -337,7 +341,7 @@ const app = struct {
         );
 
         const win_flags = win32.WS_OVERLAPPEDWINDOW;
-        const win = try win32.createWindowExW(
+        const win = try win32.createWindowEx(
             0,
             app_name,
             app_name,
@@ -372,13 +376,13 @@ const app = struct {
         var msg: win32.MSG = undefined;
 
         while (true) {
-            win32.getMessageW(&msg, null, 0, 0) catch |err| switch (err) {
+            win32.getMessage(&msg, null, 0, 0) catch |err| switch (err) {
                 error.Quit => break,
                 else => return err,
             };
 
-            _ = win32.translateMessage(&msg);
-            _ = win32.dispatchMessageW(&msg);
+            _ = win32.TranslateMessage(&msg);
+            _ = win32.DispatchMessageW(&msg);
         }
     }
 
@@ -391,7 +395,7 @@ const app = struct {
         return if (processEvent(win, msg, wparam, lparam) catch unreachable)
             0
         else
-            win32.defWindowProcW(win, msg, wparam, lparam);
+            win32.DefWindowProcW(win, msg, wparam, lparam);
     }
 
     fn processEvent(
@@ -525,7 +529,7 @@ const app = struct {
         try buf.write(L("Invalid image file: "));
         try buf.write(file_name);
         const msg = getWStr(&buf);
-        _ = try win32.messageBoxW(win, msg, app_name, 0);
+        _ = try win32.messageBox(win, msg, app_name, 0);
     }
 };
 
@@ -590,41 +594,41 @@ const gdip = struct {
         NotificationUnhook: ?*anyopaque,
     };
 
-    const GdiplusStartup = fn (
+    const GdiplusStartup = *const fn (
         token: *win32.ULONG_PTR,
         input: *const GdiplusStartupInput,
         output: *GdiplusStartupOutput,
     ) callconv(WINGDIPAPI) Status;
 
-    const GdiplusShutdown = fn (token: win32.ULONG_PTR) callconv(WINGDIPAPI) Status;
+    const GdiplusShutdown = *const fn (token: win32.ULONG_PTR) callconv(WINGDIPAPI) Status;
 
-    const GdipCreateBitmapFromFile = fn (
+    const GdipCreateBitmapFromFile = *const fn (
         filename: win32.LPCWSTR,
         image: **Image,
     ) callconv(WINGDIPAPI) Status;
 
-    const GdipCreateBitmapFromStream = fn (
+    const GdipCreateBitmapFromStream = *const fn (
         stream: *win32.IStream,
         image: **Image,
     ) callconv(WINGDIPAPI) Status;
 
-    const GdipDisposeImage = fn (image: *Image) callconv(WINGDIPAPI) Status;
+    const GdipDisposeImage = *const fn (image: *Image) callconv(WINGDIPAPI) Status;
 
-    const GdipGetImageDimension = fn (
+    const GdipGetImageDimension = *const fn (
         image: *Image,
         width: *f32,
         height: *f32,
     ) callconv(WINGDIPAPI) Status;
 
-    const GdipCreateFromHDC = fn (
+    const GdipCreateFromHDC = *const fn (
         hdc: win32.HDC,
         graphics: **Graphics,
     ) callconv(WINGDIPAPI) Status;
 
-    const GdipDeleteGraphics = fn (graphics: *Graphics) callconv(WINGDIPAPI) Status;
-    const GdipGraphicsClear = fn (graphics: *Graphics, color: u32) callconv(WINGDIPAPI) Status;
+    const GdipDeleteGraphics = *const fn (graphics: *Graphics) callconv(WINGDIPAPI) Status;
+    const GdipGraphicsClear = *const fn (graphics: *Graphics, color: u32) callconv(WINGDIPAPI) Status;
 
-    const GdipDrawImageRect = fn (
+    const GdipDrawImageRect = *const fn (
         graphics: *Graphics,
         image: *Image,
         x: f32,
@@ -633,7 +637,7 @@ const gdip = struct {
         height: f32,
     ) callconv(WINGDIPAPI) Status;
 
-    const GdipSetInterpolationMode = fn (
+    const GdipSetInterpolationMode = *const fn (
         graphics: *Graphics,
         mode: InterpolationMode,
     ) callconv(WINGDIPAPI) Status;

@@ -7,6 +7,72 @@ const win32 = std.os.windows;
 pub usingnamespace win32;
 pub usingnamespace win32.user32;
 
+// NOTE (Matteo): After upgrading to Zig 0.10.0 some user32 function wrappers stopped
+// compiling - the easiest workaround was either to fallback on the extern funtions
+// or rewrite some wrappers
+
+pub fn messageBox(
+    hwnd: ?win32.HWND,
+    text: [*:0]const u16,
+    caption: [*:0]const u16,
+    type_flags: u32,
+) !i32 {
+    const value = win32.user32.MessageBoxW(hwnd, text, caption, type_flags);
+    if (value != 0) return value;
+    return error.Unexpected;
+}
+
+pub fn registerClassEx(window_class: *const win32.user32.WNDCLASSEXW) !win32.ATOM {
+    const atom = win32.user32.RegisterClassExW(window_class);
+    if (atom != 0) return atom;
+    return error.Unexpected;
+}
+
+pub fn createWindowEx(
+    ex_style: u32,
+    class_name: [*:0]const u16,
+    window_name: [*:0]const u16,
+    style: u32,
+    X: i32,
+    Y: i32,
+    width: i32,
+    height: i32,
+    parent_hwnd: ?win32.HWND,
+    menu: ?win32.HMENU,
+    hinstance: win32.HINSTANCE,
+    param: ?*anyopaque,
+) !win32.HWND {
+    const window = win32.user32.CreateWindowExW(
+        ex_style,
+        class_name,
+        window_name,
+        style,
+        X,
+        Y,
+        width,
+        height,
+        parent_hwnd,
+        menu,
+        hinstance,
+        param,
+    );
+    if (window) |win| return win;
+    return error.Unexpected;
+}
+
+pub fn getMessage(
+    lpMsg: *win32.user32.MSG,
+    hWnd: ?win32.HWND,
+    wMsgFilterMin: u32,
+    wMsgFilterMax: u32,
+) !void {
+    const r = win32.user32.GetMessageW(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax);
+    if (r == 0) return error.Quit;
+    if (r != -1) return;
+
+    return error.Unexpected;
+}
+
 //=== Misc utilities ===//
 
 /// Emulates the L prefix used in C for "wide" string literals
@@ -334,22 +400,9 @@ pub const OPENFILENAMEW = extern struct {
     lCustData: win32.LPARAM = 0,
     lpfnHook: ?*anyopaque = null,
     lpTemplateName: ?win32.LPCWSTR = null,
-    _mac_fields: MacFields = .{},
-    _w2k_fields: Win2kFields = .{},
+    pvReserved: ?*anyopaque = null,
+    dwReserved: u32 = 0,
     FlagsEx: u32 = 0,
-
-    // #if (_WIN32_WINNT >= 0x0500)
-    const Win2kFields = if (builtin.os.isAtLeast(.windows, .win2k) orelse unreachable)
-        packed struct { pvReserved: ?*anyopaque = null, dwReserved: u32 = 0 }
-    else
-        packed struct {};
-
-    // #ifdef _MAC
-    const _MAC = false;
-    const MacFields = if (_MAC)
-        packed struct { lpEditInfo: ?*anyopaque = null, lpstrPrompt: ?win32.LPCSTR = null }
-    else
-        packed struct {};
 };
 
 pub fn getOpenFileName(ofn: *OPENFILENAMEW) Error!bool {
@@ -373,33 +426,33 @@ pub const IStream = extern struct {
     lpVtbl: [*c]Vtbl,
 
     const Vtbl = extern struct {
-        QueryInterface: fn (
+        QueryInterface: *const fn (
             [*c]IStream,
             ?*anyopaque,
             [*c]?*anyopaque,
         ) callconv(win32.WINAPI) win32.HRESULT,
 
-        AddRef: fn ([*c]IStream) callconv(win32.WINAPI) u32,
-        Release: fn ([*c]IStream) callconv(win32.WINAPI) u32,
+        AddRef: *const fn ([*c]IStream) callconv(win32.WINAPI) u32,
+        Release: *const fn ([*c]IStream) callconv(win32.WINAPI) u32,
 
-        Read: fn (
+        Read: *const fn (
             [*c]IStream,
             ?*anyopaque,
             u32,
             [*c]u32,
         ) callconv(win32.WINAPI) win32.HRESULT,
 
-        Write: fn (
+        Write: *const fn (
             [*c]IStream,
             ?*const anyopaque,
             u32,
             [*c]u32,
         ) callconv(win32.WINAPI) win32.HRESULT,
 
-        Seek: fn ([*c]IStream, i64, u32, [*c]u64) callconv(win32.WINAPI) win32.HRESULT,
-        SetSize: fn ([*c]IStream, u64) callconv(win32.WINAPI) win32.HRESULT,
+        Seek: *const fn ([*c]IStream, i64, u32, [*c]u64) callconv(win32.WINAPI) win32.HRESULT,
+        SetSize: *const fn ([*c]IStream, u64) callconv(win32.WINAPI) win32.HRESULT,
 
-        CopyTo: fn (
+        CopyTo: *const fn (
             [*c]IStream,
             [*c]IStream,
             u64,
@@ -407,14 +460,14 @@ pub const IStream = extern struct {
             [*c]u64,
         ) callconv(win32.WINAPI) win32.HRESULT,
 
-        Commit: fn ([*c]IStream, u32) callconv(win32.WINAPI) win32.HRESULT,
-        Revert: fn ([*c]IStream) callconv(win32.WINAPI) win32.HRESULT,
+        Commit: *const fn ([*c]IStream, u32) callconv(win32.WINAPI) win32.HRESULT,
+        Revert: *const fn ([*c]IStream) callconv(win32.WINAPI) win32.HRESULT,
 
-        LockRegion: fn ([*c]IStream, u64, u64, u32) callconv(win32.WINAPI) win32.HRESULT,
-        UnlockRegion: fn ([*c]IStream, u64, u64, u32) callconv(win32.WINAPI) win32.HRESULT,
+        LockRegion: *const fn ([*c]IStream, u64, u64, u32) callconv(win32.WINAPI) win32.HRESULT,
+        UnlockRegion: *const fn ([*c]IStream, u64, u64, u32) callconv(win32.WINAPI) win32.HRESULT,
 
-        Stat: fn ([*c]IStream, ?*anyopaque, u32) callconv(win32.WINAPI) win32.HRESULT,
-        Clone: fn ([*c]IStream, [*c][*c]IStream) callconv(win32.WINAPI) win32.HRESULT,
+        Stat: *const fn ([*c]IStream, ?*anyopaque, u32) callconv(win32.WINAPI) win32.HRESULT,
+        Clone: *const fn ([*c]IStream, [*c][*c]IStream) callconv(win32.WINAPI) win32.HRESULT,
     };
 };
 
