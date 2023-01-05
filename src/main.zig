@@ -381,8 +381,8 @@ const app = struct {
                 else => return err,
             };
 
-            _ = win32.TranslateMessage(&msg);
-            _ = win32.DispatchMessageW(&msg);
+            _ = win32.translateMessage(&msg);
+            _ = win32.dispatchMessage(&msg);
         }
     }
 
@@ -395,7 +395,7 @@ const app = struct {
         return if (processEvent(win, msg, wparam, lparam) catch unreachable)
             0
         else
-            win32.DefWindowProcW(win, msg, wparam, lparam);
+            win32.defWindowProc(win, msg, wparam, lparam);
     }
 
     fn processEvent(
@@ -495,7 +495,7 @@ const app = struct {
             try buf.write(file_name);
             const title = getWStr(&buf);
 
-            if (win32.SetWindowTextW(win, title) == 0) return error.Unexpected;
+            if (win32.setWindowText(win, title) == 0) return error.Unexpected;
         }
     }
 

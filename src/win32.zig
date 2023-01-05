@@ -11,18 +11,28 @@ pub usingnamespace win32.user32;
 // compiling - the easiest workaround was either to fallback on the extern funtions
 // or rewrite some wrappers
 
+pub const defWindowProcW = @compileError("Call defWindowProc instead");
+pub const registerClassExW = @compileError("Call registerClassExW instead");
+pub const createWindowExW = @compileError("Call createWindowEx instead");
+pub const dispatchMessageW = @compileError("Call dispatchMessage instead");
+pub const getMessageW = @compileError("Call getMessage instead");
+pub const messageBoxW = @compileError("Call messageBox instead");
+
+pub const dispatchMessage = win32.user32.DispatchMessageW;
+pub const defWindowProc = win32.user32.DefWindowProcW;
+
 pub fn messageBox(
     hwnd: ?win32.HWND,
     text: [*:0]const u16,
     caption: [*:0]const u16,
     type_flags: u32,
-) !i32 {
+) Error!i32 {
     const value = win32.user32.MessageBoxW(hwnd, text, caption, type_flags);
     if (value != 0) return value;
     return error.Unexpected;
 }
 
-pub fn registerClassEx(window_class: *const win32.user32.WNDCLASSEXW) !win32.ATOM {
+pub fn registerClassEx(window_class: *const win32.user32.WNDCLASSEXW) Error!win32.ATOM {
     const atom = win32.user32.RegisterClassExW(window_class);
     if (atom != 0) return atom;
     return error.Unexpected;
@@ -41,7 +51,7 @@ pub fn createWindowEx(
     menu: ?win32.HMENU,
     hinstance: win32.HINSTANCE,
     param: ?*anyopaque,
-) !win32.HWND {
+) Error!win32.HWND {
     const window = win32.user32.CreateWindowExW(
         ex_style,
         class_name,
@@ -91,7 +101,14 @@ pub inline fn loadProc(comptime T: type, comptime name: [*:0]const u8, handle: w
         return error.Unexpected);
 }
 
-pub extern "user32" fn SetWindowTextW(
+pub inline fn setWindowText(
+    hwnd: win32.HWND,
+    string: win32.LPCWSTR,
+) win32.BOOL {
+    return SetWindowTextW(hwnd, string);
+}
+
+extern "user32" fn SetWindowTextW(
     hWnd: win32.HWND,
     lpString: win32.LPCWSTR,
 ) callconv(win32.WINAPI) win32.BOOL;
@@ -120,7 +137,7 @@ pub inline fn compareStringOrdinal(
     string1: []const u16,
     string2: []const u16,
     ignore_case: bool,
-) !std.math.Order {
+) Error!std.math.Order {
     const cmp = CompareStringOrdinal(
         string1.ptr,
         @intCast(c_int, string1.len),
