@@ -7,6 +7,13 @@ const L = win32.L;
 
 const app_name = L("MiniView");
 
+// TODO (Matteo):
+// - Implement image cache
+// - Implement async loading
+// - Cleanup string management (UTF8 <=> UTF16)
+// - Cleanup memory management
+// - Cleanup panic handling and error reporting in general
+
 //=== Infrastructure ===//
 
 pub fn main() void {
@@ -79,16 +86,17 @@ fn getWStr(buf: *TempBuf(u16)) [:0]const u16 {
 //=== Actual application ===//
 
 const app = struct {
+    const max_path_size = win32.PATH_MAX_WIDE;
     const extensions = L("*.bmp;*.png;*.jpg;*.jpeg;*.tiff");
 
-    const MAX_PATH = win32.PATH_MAX_WIDE;
-    const MAX_NAME = win32.MAX_PATH;
+    var image: ?*gdip.Image = null;
+    var files: Browser = undefined;
 
     const FileInfo = struct {
-        buf: [MAX_NAME]u16,
+        buf: [win32.MAX_PATH]u16,
         len: usize,
 
-        fn init(file_name: *const [MAX_NAME]u16) FileInfo {
+        fn init(file_name: *const [win32.MAX_PATH]u16) FileInfo {
             var self: FileInfo = undefined;
 
             self.len = std.mem.indexOfScalar(u16, file_name, 0) orelse unreachable;
@@ -130,7 +138,7 @@ const app = struct {
     const Browser = struct {
         // TODO (Matteo): Review.
         // The solution adopted here is to keep a big chunk of virtual memory, with
-        // an header of 'MAX_PATH' u16's to store the current file path, followed
+        // an header of 'max_path_size' u16's to store the current file path, followed
         // by a dynamic list of file names (without directory)
         // This doesn't waste too much memory, but it is not very clear since some pointer
         // juggling is required.
@@ -168,7 +176,7 @@ const app = struct {
             assert(std.mem.isAligned(@ptrToInt(self.bytes), 2));
 
             // Reserve space for path storage
-            self.path_bytes = std.mem.alignForward(2 * MAX_PATH, alignment);
+            self.path_bytes = std.mem.alignForward(2 * max_path_size, alignment);
             try self.ensureCapacity(self.path_bytes);
             self.path = @ptrCast([*]u16, @alignCast(2, self.bytes));
 
@@ -198,7 +206,7 @@ const app = struct {
             const filename = path[sep.. :0];
 
             // Copy directory name in find pattern
-            var pattern: [MAX_PATH]u16 = undefined;
+            var pattern: [max_path_size]u16 = undefined;
             if (dirname.len > pattern.len - 16) return error.PathTooLong;
             assert(dirname[sep - 1] == '\\');
             std.mem.copy(u16, pattern[0..], dirname);
@@ -294,9 +302,6 @@ const app = struct {
     const Command = enum(u32) {
         Open = 1,
     };
-
-    var image: ?*gdip.Image = null;
-    var files: Browser = undefined;
 
     pub fn main() anyerror!void {
         // Init memory block
@@ -500,7 +505,7 @@ const app = struct {
     }
 
     fn open(win: win32.HWND) !void {
-        var path_buf: [MAX_PATH]u16 = undefined;
+        var path_buf: [max_path_size]u16 = undefined;
         var path_ptr = @ptrCast([*:0]u16, &path_buf[0]);
         path_ptr[0] = 0;
 
