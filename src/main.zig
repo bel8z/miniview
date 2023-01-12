@@ -135,6 +135,65 @@ const app = struct {
         }
     };
 
+    /// Provides the entire memory layout for the application (with the exception
+    /// of decoded images which are handled internally by GDI+)
+    const Memory = struct {
+        // TODO (Matteo): 1GB should be enough, or not?
+        const capacity: usize = 1024 * 1024 * 1024;
+
+        bytes: [*]u8,
+        hi_alloc: usize = 0,
+        hi_commit: usize = 0,
+        lo_alloc: usize = capacity,
+        lo_commit: usize = capacity,
+        scratch_stack: usize = 0,
+
+        // Persistent allocation are kept at the bottom of the stack and never
+        // freed, so they must be performed before any volatile  ones
+        pub fn persistentAlloc(comptime T: type, size: usize) []T;
+
+        // Volatile allocation
+        pub fn alloc(comptime T: type, mem: []T) bool;
+        pub fn resize(comptime T: type, mem: []T) bool;
+
+        // TODO (Matteo): Are scratch and volatile allocs really different concepts?
+        // Temporary scratch storage allocated on top of the stack - its main purpose
+        // is to provide storage for reading image files, before decoding them.
+        const Scratch = struct {};
+        pub fn scratchAlloc(comptime T: type, size: usize) Scratch;
+        pub fn scratchFree(scratch: Scratch) void;
+
+        // Storage stack dedicated to variable length strings, grows from the bottom
+        // of the memory block - this specialization is useful to allow the volatile
+        // storage to be used for dynamic arrays of homogenous structs, and using
+        // the minimum required space for strings
+        pub fn stringAlloc(size: usize) []u8;
+
+        pub fn init() !Memory {
+            // Allocate block
+            var self = Memory{ .bytes = @ptrCast([*]u8, try win32.VirtualAlloc(
+                null,
+                capacity_bytes,
+                win32.MEM_RESERVE,
+                win32.PAGE_NOACCESS,
+            )) };
+
+            assert(std.mem.isAligned(@ptrToInt(self.bytes), 2));
+
+            return self;
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.clear();
+            self.committed_bytes = 0;
+            win32.VirtualFree(@ptrCast(win32.LPVOID, self.bytes), 0, win32.MEM_RELEASE);
+        }
+
+        pub fn clear(self: *Memory) void {
+            assert(self.scratch_stack == 0);
+        }
+    };
+
     const Browser = struct {
         // TODO (Matteo): Review.
         // The solution adopted here is to keep a big chunk of virtual memory, with
