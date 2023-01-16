@@ -142,48 +142,130 @@ const app = struct {
         const capacity: usize = 1024 * 1024 * 1024;
 
         bytes: [*]u8,
-        hi_alloc: usize = 0,
-        hi_commit: usize = 0,
-        lo_alloc: usize = capacity,
-        lo_commit: usize = capacity,
+        volatile_end: usize = 0,
+        string_start: usize = capacity,
         scratch_stack: usize = 0,
 
         // Persistent allocation are kept at the bottom of the stack and never
         // freed, so they must be performed before any volatile  ones
-        pub fn persistentAlloc(comptime T: type, size: usize) []T;
+        pub fn persistentAlloc(self: *Memory, comptime T: type, size: usize) []T {
+            _ = self;
+            _ = size;
+            @compileError("Not implemented");
+        }
 
         // Volatile allocation
-        pub fn alloc(comptime T: type, mem: []T) bool;
-        pub fn resize(comptime T: type, mem: []T) bool;
+        pub fn alloc(self: *Memory, comptime T: type, size: usize) ![]T {
+            const next_pos = std.mem.alignForward(self.volatile_end, @alignOf(T));
+
+            const avail = self.string_start - next_pos;
+            if (avail < size) return error.OutOfMemory;
+
+            const curr_commit = std.mem.alignForward(self.volatile_end, std.mem.page_size);
+            const next_commit = std.mem.alignForward(next_pos, std.mem.page_size);
+
+            if (next_commit > curr_commit) {
+                _ = try win32.VirtualAlloc(
+                    @ptrCast(win32.LPVOID, self.bytes + next_commit),
+                    next_commit - curr_commit,
+                    win32.MEM_COMMIT,
+                    win32.PAGE_READWRITE,
+                );
+            }
+
+            self.volatile_end = next_pos + size;
+            return self.bytes[next_pos..][0..size];
+        }
+
+        pub fn isLastAlloc(self: *Memory, mem: anytype) bool {
+            const end = @ptrCast(*u8, mem.ptr + mem.len);
+            return (end == self.bytes + self.volatile_end);
+        }
+
+        pub fn resize(self: *Memory, comptime T: type, mem: *[]T, size: usize) bool {
+            if (!self.isLastAlloc(mem.*)) return false;
+
+            if (size < mem.len) {
+                assert(self.volatile_end >= size);
+                self.volatile_end -= size;
+            } else {
+                const avail = self.string_start - self.volatile_end;
+                if (avail < size) return error.OutOfMemory;
+
+                const next_pos = self.volatile_end + size;
+                const curr_commit = std.mem.alignForward(self.volatile_end, std.mem.page_size);
+                const next_commit = std.mem.alignForward(next_pos, std.mem.page_size);
+
+                if (next_commit > curr_commit) {
+                    _ = try win32.VirtualAlloc(
+                        @ptrCast(win32.LPVOID, self.bytes + next_commit),
+                        next_commit - curr_commit,
+                        win32.MEM_COMMIT,
+                        win32.PAGE_READWRITE,
+                    );
+                }
+
+                self.volatile_end = next_pos;
+            }
+
+            mem.len = size;
+            return true;
+        }
 
         // TODO (Matteo): Are scratch and volatile allocs really different concepts?
         // Temporary scratch storage allocated on top of the stack - its main purpose
         // is to provide storage for reading image files, before decoding them.
         const Scratch = struct {};
-        pub fn scratchAlloc(comptime T: type, size: usize) Scratch;
-        pub fn scratchFree(scratch: Scratch) void;
+        pub fn scratchAlloc(comptime T: type, size: usize) Scratch {
+            _ = T;
+            _ = size;
+            @compileError("Not implemented");
+        }
+        pub fn scratchFree(scratch: Scratch) void {
+            _ = scratch;
+            @compileError("Not implemented");
+        }
 
         // Storage stack dedicated to variable length strings, grows from the bottom
         // of the memory block - this specialization is useful to allow the volatile
         // storage to be used for dynamic arrays of homogenous structs, and using
         // the minimum required space for strings
-        pub fn stringAlloc(size: usize) []u8;
+        pub fn stringAlloc(self: *Memory, size: usize) ![]u8 {
+            const avail = self.string_start - self.volatile_end;
+            if (avail < size) return error.OutOfMemory;
+
+            const next_pos = self.string_start - size;
+            const curr_commit = std.mem.alignBackward(self.string_start, std.mem.page_size);
+            const next_commit = std.mem.alignBackward(next_pos, std.mem.page_size);
+
+            if (next_commit < curr_commit) {
+                _ = try win32.VirtualAlloc(
+                    @ptrCast(win32.LPVOID, self.bytes + next_commit),
+                    curr_commit - next_commit,
+                    win32.MEM_COMMIT,
+                    win32.PAGE_READWRITE,
+                );
+            }
+
+            self.string_start = next_pos;
+            return self.bytes[self.string_start..][0..size];
+        }
 
         pub fn init() !Memory {
             // Allocate block
             var self = Memory{ .bytes = @ptrCast([*]u8, try win32.VirtualAlloc(
                 null,
-                capacity_bytes,
+                capacity,
                 win32.MEM_RESERVE,
                 win32.PAGE_NOACCESS,
             )) };
 
-            assert(std.mem.isAligned(@ptrToInt(self.bytes), 2));
+            assert(std.mem.isAligned(@ptrToInt(self.bytes), std.mem.page_size));
 
             return self;
         }
 
-        pub fn deinit(self: *Self) void {
+        pub fn deinit(self: *Memory) void {
             self.clear();
             self.committed_bytes = 0;
             win32.VirtualFree(@ptrCast(win32.LPVOID, self.bytes), 0, win32.MEM_RELEASE);
