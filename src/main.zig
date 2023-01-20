@@ -87,22 +87,22 @@ fn getWStr(buf: *TempBuf(u16)) [:0]const u16 {
 
 const app = struct {
     const max_path_size = win32.PATH_MAX_WIDE;
-    const extensions = L("*.bmp;*.png;*.jpg;*.jpeg;*.tiff");
+    const extensions = "*.bmp;*.png;*.jpg;*.jpeg;*.tiff";
 
     var image: ?*gdip.Image = null;
     var files: Browser = undefined;
 
     const FileInfo = struct {
-        buf: [win32.MAX_PATH]u16,
+        buf: [win32.MAX_PATH]u8,
         len: usize,
 
-        fn init(file_name: *const [win32.MAX_PATH]u16) FileInfo {
+        fn init(file_name: []const u8) FileInfo {
             var self: FileInfo = undefined;
+            assert(file_name.len <= self.buf.len);
 
-            self.len = std.mem.indexOfScalar(u16, file_name, 0) orelse unreachable;
-            assert(self.len <= self.buf.len);
+            self.len = file_name.len;
+            std.mem.copy(u8, self.buf[0..self.len], file_name);
 
-            std.mem.copy(u16, self.buf[0..self.len], file_name[0..self.len]);
             assert(self.buf[self.len - 1] != 0);
 
             self.buf[self.len] = 0;
@@ -110,28 +110,8 @@ const app = struct {
             return self;
         }
 
-        fn name(self: FileInfo) [:0]const u16 {
+        fn name(self: FileInfo) [:0]const u8 {
             return self.buf[0..self.len :0];
-        }
-
-        fn supported(self: FileInfo) !bool {
-            const dot = std.mem.lastIndexOfScalar(u16, self.buf[0..self.len], '.') orelse return false;
-            const ext = self.buf[dot..self.len];
-
-            if (ext.len == 0) return false;
-
-            assert(ext[ext.len - 1] != 0);
-
-            // TODO (Matteo): Store tokens at startup
-            var tokens = std.mem.tokenize(u16, extensions, L(";*"));
-            while (tokens.next()) |token| {
-                if (token.len == ext.len) {
-                    const cmp = try win32.compareStringOrdinal(ext, token, true);
-                    if (cmp == .eq) return true;
-                }
-            }
-
-            return false;
         }
     };
 
@@ -279,7 +259,7 @@ const app = struct {
     const Browser = struct {
         // TODO (Matteo): Review.
         // The solution adopted here is to keep a big chunk of virtual memory, with
-        // an header of 'max_path_size' u16's to store the current file path, followed
+        // an header of 'max_path_size' bytes to store the current file path, followed
         // by a dynamic list of file names (without directory)
         // This doesn't waste too much memory, but it is not very clear since some pointer
         // juggling is required.
@@ -288,9 +268,8 @@ const app = struct {
         bytes: [*]u8,
         committed_bytes: usize,
 
-        path: [*]u16,
-        path_bytes: usize,
-        path_offset: usize,
+        path_cap: usize,
+        path_len: usize,
 
         files: []FileInfo,
         file_index: usize,
@@ -317,12 +296,11 @@ const app = struct {
             assert(std.mem.isAligned(@ptrToInt(self.bytes), 2));
 
             // Reserve space for path storage
-            self.path_bytes = std.mem.alignForward(2 * max_path_size, alignment);
-            try self.ensureCapacity(self.path_bytes);
-            self.path = @ptrCast([*]u16, @alignCast(2, self.bytes));
+            self.path_cap = std.mem.alignForward(2 * max_path_size, alignment);
+            try self.ensureCapacity(self.path_cap);
 
             // Prepare files list
-            self.files.ptr = @ptrCast([*]FileInfo, @alignCast(alignment, self.bytes + self.path_bytes));
+            self.files.ptr = @ptrCast([*]FileInfo, @alignCast(alignment, self.bytes + self.path_cap));
             self.files.len = 0;
             self.file_index = 0;
 
@@ -339,53 +317,32 @@ const app = struct {
             self.files.len = 0;
         }
 
-        pub fn updateFiles(self: *Self, path: [:0]const u16) !void {
+        pub fn updateFiles(self: *Self, path: []const u8) !void {
             // Split path in file and directory names
-            var sep = std.mem.lastIndexOfScalar(u16, path, '\\') orelse return error.InvalidPath;
+            var sep = std.mem.lastIndexOfScalar(u8, path, '\\') orelse return error.InvalidPath;
             sep += 1;
             const dirname = path[0..sep];
-            const filename = path[sep.. :0];
-
-            // Copy directory name in find pattern
-            var pattern: [max_path_size]u16 = undefined;
-            if (dirname.len > pattern.len - 16) return error.PathTooLong;
-            assert(dirname[sep - 1] == '\\');
-            std.mem.copy(u16, pattern[0..], dirname);
-
-            // Append wildcard to pattern and null terminate
-            const suffix = L("*");
-            const pattern_len = sep + suffix.len;
-            std.mem.copy(u16, pattern[sep..], suffix[0..]);
-            pattern[pattern_len] = 0;
+            const filename = path[sep..];
 
             // Iterate
-            var data: win32.WIN32_FIND_DATAW = undefined;
-            const find_str = pattern[0..pattern_len :0];
+            var dir = try std.fs.openIterableDirAbsolute(dirname, .{});
+            var iter = dir.iterate();
+            while (try iter.next()) |entry| {
+                if (entry.kind == .File and isSupported(entry.name)) {
+                    const next_len = self.files.len + 1;
+                    try self.ensureCapacity(self.path_cap + next_len * @sizeOf(FileInfo));
 
-            const find = win32.kernel32.FindFirstFileW(find_str, &data);
-            if (find == win32.INVALID_HANDLE_VALUE) return error.Unexpected;
+                    self.files.len = next_len;
+                    self.files[next_len - 1] = FileInfo.init(entry.name);
 
-            while (true) {
-                if (data.dwFileAttributes & win32.FILE_ATTRIBUTE_DIRECTORY == 0) {
-                    const file = FileInfo.init(&data.cFileName);
-
-                    if (try file.supported()) {
-                        const next_len = self.files.len + 1;
-                        try self.ensureCapacity(self.path_bytes + next_len * @sizeOf(FileInfo));
-
-                        self.files.len = next_len;
-                        self.files[next_len - 1] = file;
-
-                        if (std.mem.eql(u16, file.name(), filename)) self.file_index = self.files.len - 1;
-                    }
+                    if (std.mem.eql(u8, entry.name, filename)) self.file_index = self.files.len - 1;
                 }
-
-                if (win32.kernel32.FindNextFileW(find, &data) == win32.FALSE) break;
             }
 
             // Store directory name for path reconstruction
-            self.path_offset = dirname.len;
-            std.mem.copy(u16, self.path[0..dirname.len], dirname);
+            assert(dirname.len < self.path_cap);
+            self.path_len = dirname.len;
+            std.mem.copy(u8, self.bytes[0..dirname.len], dirname);
         }
 
         pub fn prev(self: *Self) bool {
@@ -404,20 +361,16 @@ const app = struct {
             return false;
         }
 
-        pub fn curr(self: *Self) ?[:0]const u16 {
+        pub fn curr(self: *Self) ?[]const u8 {
             if (self.files.len == 0) return null;
 
             // Append filename
-            const avail = self.path_bytes - self.path_offset;
+            const avail = self.path_cap - self.path_len;
             const name = self.files[self.file_index].name();
             assert(avail > name.len + 1);
-            std.mem.copy(u16, self.path[self.path_offset..avail], name);
+            std.mem.copy(u8, self.bytes[self.path_len..avail], name);
 
-            // Null terminate
-            const full_len = self.path_offset + name.len;
-            self.path[full_len] = 0;
-
-            return self.path[0..full_len :0];
+            return self.bytes[0 .. self.path_len + name.len];
         }
 
         fn ensureCapacity(self: *Self, required_bytes: usize) !void {
@@ -509,10 +462,14 @@ const app = struct {
         {
             const args = win32.getArgs();
             defer win32.freeArgs(args);
+
             if (args.len > 1) {
-                const filename = args[1][0..std.mem.len(args[1]) :0];
-                try load(win, filename);
-                try files.updateFiles(filename);
+                var path8: [max_path_size]u8 = undefined;
+                const path16 = args[1][0..std.mem.len(args[1])];
+                const len = try std.unicode.utf16leToUtf8(&path8, path16);
+
+                try load(win, path8[0..len]);
+                try files.updateFiles(path8[0..len]);
             }
         }
 
@@ -625,7 +582,25 @@ const app = struct {
         }
     }
 
-    fn load(win: win32.HWND, file_name: [:0]const u16) !void {
+    fn load(win: win32.HWND, file_name_utf8: []const u8) !void {
+        // TODO (Matteo): Avoid some UTF8 <=> UTF16 conversion?
+
+        var buf = getTempBuf(u16);
+
+        // Prepend string for composing the title
+        try buf.write(app_name);
+        try buf.write(L(" - "));
+        const offset = buf.readableLength();
+
+        // Append filename
+        const len = try std.unicode.utf8ToUtf16Le(buf.writableSlice(0), file_name_utf8);
+        buf.update(len);
+
+        const title = getWStr(&buf);
+        const file_name = title[offset.. :0];
+
+        assert(len == file_name.len);
+
         var new_image: *gdip.Image = undefined;
         if (gdip.createImageFromFile(file_name, &new_image) != 0) {
             try invalidFile(win, file_name);
@@ -634,32 +609,28 @@ const app = struct {
             image = new_image;
 
             if (win32.InvalidateRect(win, null, win32.TRUE) == 0) return error.Unexpected;
-
-            var buf = getTempBuf(u16);
-            try buf.write(app_name);
-            try buf.write(L(" - "));
-            try buf.write(file_name);
-            const title = getWStr(&buf);
-
             if (win32.setWindowText(win, title) == 0) return error.Unexpected;
         }
     }
 
     fn open(win: win32.HWND) !void {
-        var path_buf: [max_path_size]u16 = undefined;
-        var path_ptr = @ptrCast([*:0]u16, &path_buf[0]);
-        path_ptr[0] = 0;
+        var buf16 = [_]u16{0} ** max_path_size;
+        var buf8 = [_]u8{0} ** max_path_size;
 
+        var ptr = @ptrCast([*:0]u16, &buf16[0]);
         var ofn = win32.OPENFILENAMEW{
             .hwndOwner = win,
-            .lpstrFile = path_ptr,
-            .nMaxFile = @intCast(u32, path_buf.len),
+            .lpstrFile = ptr,
+            .nMaxFile = @intCast(u32, buf16.len),
             .lpstrFilter = L("Image files\x00") ++ extensions ++ L("\x00"),
         };
 
         if (try win32.getOpenFileName(&ofn)) {
-            const path = path_buf[0..std.mem.len(path_ptr) :0];
+            const len = try std.unicode.utf16leToUtf8(&buf8, buf16[0..std.mem.len(ptr)]);
+            const path = buf8[0..len];
+
             try load(win, path);
+
             try files.updateFiles(path);
         }
     }
@@ -670,12 +641,44 @@ const app = struct {
         }
     }
 
+    fn isSupported(filename: []const u8) bool {
+        const dot = std.mem.lastIndexOfScalar(u8, filename, '.') orelse return false;
+        const ext = filename[dot..filename.len];
+
+        if (ext.len == 0) return false;
+
+        assert(ext[ext.len - 1] != 0);
+
+        // TODO (Matteo): Store tokens at startup
+        var tokens = std.mem.tokenize(u8, extensions, ";*");
+        while (tokens.next()) |token| {
+            if (std.ascii.eqlIgnoreCase(token, ext)) return true;
+        }
+
+        return false;
+    }
+
     fn invalidFile(win: win32.HWND, file_name: [:0]const u16) gdip.Error!void {
         var buf = getTempBuf(u16);
         try buf.write(L("Invalid image file: "));
         try buf.write(file_name);
         const msg = getWStr(&buf);
         _ = try win32.messageBox(win, msg, app_name, 0);
+    }
+
+    fn messageBox(win: ?win32.HWND, comptime fmt: []const u8, args: anytype) !void {
+        var buf = getTempBuf(u8);
+        var w = buf.writer();
+
+        try w.print(fmt, args);
+
+        var alloc = std.heap.FixedBufferAllocator.init(buf.writableSlice(0));
+        const out = try std.unicode.utf8ToUtf16LeWithNull(
+            alloc.allocator(),
+            buf.readableSlice(0),
+        );
+
+        _ = try win32.messageBox(win, out, app_name, 0);
     }
 };
 
