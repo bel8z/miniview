@@ -245,12 +245,6 @@ const app = struct {
             return self;
         }
 
-        pub fn deinit(self: *Memory) void {
-            self.clear();
-            self.committed_bytes = 0;
-            win32.VirtualFree(@ptrCast(win32.LPVOID, self.bytes), 0, win32.MEM_RELEASE);
-        }
-
         pub fn clear(self: *Memory) void {
             assert(self.scratch_stack == 0);
         }
@@ -305,12 +299,6 @@ const app = struct {
             self.file_index = 0;
 
             return self;
-        }
-
-        pub fn deinit(self: *Self) void {
-            self.clear();
-            self.committed_bytes = 0;
-            win32.VirtualFree(@ptrCast(win32.LPVOID, self.bytes), 0, win32.MEM_RELEASE);
         }
 
         pub fn clear(self: *Self) void {
@@ -400,7 +388,6 @@ const app = struct {
     pub fn main() anyerror!void {
         // Init memory block
         files = try Browser.init();
-        defer files.deinit();
 
         // Register window class
         const hinst = win32.getCurrentInstance();
@@ -425,11 +412,9 @@ const app = struct {
 
         // Init buffered painting
         try win32.initBufferedPaint();
-        defer win32.deinitBufferedPaint();
 
         // Init GDI+
         try gdip.init();
-        defer gdip.deinit();
 
         // Create window
         const menu = try win32.createMenu();
@@ -749,8 +734,6 @@ const gdip = struct {
         output: *GdiplusStartupOutput,
     ) callconv(WINGDIPAPI) Status;
 
-    const GdiplusShutdown = *const fn (token: win32.ULONG_PTR) callconv(WINGDIPAPI) Status;
-
     const GdipCreateBitmapFromFile = *const fn (
         filename: win32.LPCWSTR,
         image: **Image,
@@ -793,7 +776,6 @@ const gdip = struct {
 
     var dll: win32.HMODULE = undefined;
     var token: win32.ULONG_PTR = 0;
-    var shutdown: GdiplusShutdown = undefined;
     var createImageFromFile: GdipCreateBitmapFromFile = undefined;
     var createImageFromStream: GdipCreateBitmapFromStream = undefined;
     var disposeImage: GdipDisposeImage = undefined;
@@ -806,7 +788,6 @@ const gdip = struct {
 
     pub fn init() Error!void {
         dll = win32.kernel32.LoadLibraryW(L("Gdiplus")) orelse return error.Unexpected;
-        shutdown = try win32.loadProc(GdiplusShutdown, "GdiplusShutdown", dll);
         createImageFromFile = try win32.loadProc(GdipCreateBitmapFromFile, "GdipCreateBitmapFromFile", dll);
         createImageFromStream = try win32.loadProc(GdipCreateBitmapFromStream, "GdipCreateBitmapFromStream", dll);
         disposeImage = try win32.loadProc(GdipDisposeImage, "GdipDisposeImage", dll);
@@ -822,11 +803,6 @@ const gdip = struct {
         var output: GdiplusStartupOutput = undefined;
         const status = startup(&token, &input, &output);
         try checkStatus(status);
-    }
-
-    pub fn deinit() void {
-        _ = shutdown(token);
-        _ = win32.kernel32.FreeLibrary(dll);
     }
 
     inline fn checkStatus(status: Status) Error!void {
