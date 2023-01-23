@@ -86,22 +86,27 @@ fn getWStr(buf: *TempBuf(u16)) [:0]const u16 {
 //=== Actual application ===//
 
 const app = struct {
-    const max_path_size = win32.PATH_MAX_WIDE;
+    // TODO (Matteo): technically this should be win32.PATH_MAX_WIDE, which is
+    // 32767. This is quite large for static buffers, so we - temporarily - settle
+    // to a smaller limit
+    const max_path_size = 1024;
     const extensions = "*.bmp;*.png;*.jpg;*.jpeg;*.tiff";
 
     var image: ?*gdip.Image = null;
     var files: Browser = undefined;
 
     const FileInfo = struct {
-        buf: [win32.MAX_PATH]u8,
+        buf: [max_path_size]u8,
         len: usize,
 
-        fn init(file_name: []const u8) FileInfo {
+        fn init(dir_name: []const u8, file_name: []const u8) FileInfo {
             var self: FileInfo = undefined;
-            assert(file_name.len <= self.buf.len);
 
-            self.len = file_name.len;
-            std.mem.copy(u8, self.buf[0..self.len], file_name);
+            self.len = dir_name.len + file_name.len;
+            assert(self.len <= self.buf.len);
+
+            std.mem.copy(u8, self.buf[0..dir_name.len], dir_name);
+            std.mem.copy(u8, self.buf[dir_name.len..][0..file_name.len], file_name);
 
             assert(self.buf[self.len - 1] != 0);
 
@@ -252,18 +257,10 @@ const app = struct {
 
     const Browser = struct {
         // TODO (Matteo): Review.
-        // The solution adopted here is to keep a big chunk of virtual memory, with
-        // an header of 'max_path_size' bytes to store the current file path, followed
-        // by a dynamic list of file names (without directory)
-        // This doesn't waste too much memory, but it is not very clear since some pointer
-        // juggling is required.
         const capacity_bytes: usize = 1024 * 1024 * 1024;
 
         bytes: [*]u8,
         committed_bytes: usize,
-
-        path_cap: usize,
-        path_len: usize,
 
         files: []FileInfo,
         file_index: usize,
@@ -289,12 +286,8 @@ const app = struct {
 
             assert(std.mem.isAligned(@ptrToInt(self.bytes), 2));
 
-            // Reserve space for path storage
-            self.path_cap = std.mem.alignForward(2 * max_path_size, alignment);
-            try self.ensureCapacity(self.path_cap);
-
             // Prepare files list
-            self.files.ptr = @ptrCast([*]FileInfo, @alignCast(alignment, self.bytes + self.path_cap));
+            self.files.ptr = @ptrCast([*]FileInfo, @alignCast(alignment, self.bytes));
             self.files.len = 0;
             self.file_index = 0;
 
@@ -318,19 +311,14 @@ const app = struct {
             while (try iter.next()) |entry| {
                 if (entry.kind == .File and isSupported(entry.name)) {
                     const next_len = self.files.len + 1;
-                    try self.ensureCapacity(self.path_cap + next_len * @sizeOf(FileInfo));
+                    try self.ensureCapacity(next_len * @sizeOf(FileInfo));
 
                     self.files.len = next_len;
-                    self.files[next_len - 1] = FileInfo.init(entry.name);
+                    self.files[next_len - 1] = FileInfo.init(dirname, entry.name);
 
                     if (std.mem.eql(u8, entry.name, filename)) self.file_index = self.files.len - 1;
                 }
             }
-
-            // Store directory name for path reconstruction
-            assert(dirname.len < self.path_cap);
-            self.path_len = dirname.len;
-            std.mem.copy(u8, self.bytes[0..dirname.len], dirname);
         }
 
         pub fn prev(self: *Self) bool {
@@ -351,14 +339,7 @@ const app = struct {
 
         pub fn curr(self: *Self) ?[]const u8 {
             if (self.files.len == 0) return null;
-
-            // Append filename
-            const avail = self.path_cap - self.path_len;
-            const name = self.files[self.file_index].name();
-            assert(avail > name.len + 1);
-            std.mem.copy(u8, self.bytes[self.path_len..avail], name);
-
-            return self.bytes[0 .. self.path_len + name.len];
+            return self.files[self.file_index].name();
         }
 
         fn ensureCapacity(self: *Self, required_bytes: usize) !void {
@@ -600,7 +581,7 @@ const app = struct {
 
     fn open(win: win32.HWND) !void {
         var buf16 = [_]u16{0} ** max_path_size;
-        var buf8 = [_]u8{0} ** max_path_size;
+        var buf8 = [_]u8{0} ** (2 * max_path_size);
 
         var ptr = @ptrCast([*:0]u16, &buf16[0]);
         var ofn = win32.OPENFILENAMEW{
