@@ -92,32 +92,20 @@ const app = struct {
     const max_path_size = 1024;
     const extensions = "*.bmp;*.png;*.jpg;*.jpeg;*.tiff";
 
+    // TODO (Matteo): Review.
+    const capacity_bytes: usize = 1024 * 1024 * 1024;
+
+    var bytes: [*]u8 = undefined;
+    var committed_bytes: usize = 0;
+
+    var files: []FileInfo = undefined;
+    var file_index: usize = 0;
+
     var image: ?*gdip.Image = null;
-    var files: Browser = undefined;
 
     const FileInfo = struct {
-        buf: [max_path_size]u8,
-        len: usize,
-
-        fn init(dir_name: []const u8, file_name: []const u8) FileInfo {
-            var self: FileInfo = undefined;
-
-            self.len = dir_name.len + file_name.len;
-            assert(self.len <= self.buf.len);
-
-            std.mem.copy(u8, self.buf[0..dir_name.len], dir_name);
-            std.mem.copy(u8, self.buf[dir_name.len..][0..file_name.len], file_name);
-
-            assert(self.buf[self.len - 1] != 0);
-
-            self.buf[self.len] = 0;
-
-            return self;
-        }
-
-        fn name(self: FileInfo) [:0]const u8 {
-            return self.buf[0..self.len :0];
-        }
+        buf: [max_path_size]u8 = undefined,
+        len: usize = 0,
     };
 
     /// Provides the entire memory layout for the application (with the exception
@@ -255,120 +243,32 @@ const app = struct {
         }
     };
 
-    const Browser = struct {
-        // TODO (Matteo): Review.
-        const capacity_bytes: usize = 1024 * 1024 * 1024;
-
-        bytes: [*]u8,
-        committed_bytes: usize,
-
-        files: []FileInfo,
-        file_index: usize,
-
-        const Self = @This();
-        const alignment = @alignOf(FileInfo);
-
-        pub fn init() !Self {
-            var self: Self = undefined;
-
-            // Allocate block
-            self.committed_bytes = 0;
-            self.bytes = @ptrCast([*]u8, try win32.VirtualAlloc(
-                null,
-                capacity_bytes,
-                win32.MEM_RESERVE,
-                win32.PAGE_NOACCESS,
-            ));
-
-            if (!std.mem.isAligned(@ptrToInt(self.bytes), alignment)) {
-                return error.MisalignedAddress;
-            }
-
-            assert(std.mem.isAligned(@ptrToInt(self.bytes), 2));
-
-            // Prepare files list
-            self.files.ptr = @ptrCast([*]FileInfo, @alignCast(alignment, self.bytes));
-            self.files.len = 0;
-            self.file_index = 0;
-
-            return self;
-        }
-
-        pub fn clear(self: *Self) void {
-            self.files.len = 0;
-        }
-
-        pub fn updateFiles(self: *Self, path: []const u8) !void {
-            // Split path in file and directory names
-            var sep = std.mem.lastIndexOfScalar(u8, path, '\\') orelse return error.InvalidPath;
-            sep += 1;
-            const dirname = path[0..sep];
-            const filename = path[sep..];
-
-            // Iterate
-            var dir = try std.fs.openIterableDirAbsolute(dirname, .{});
-            var iter = dir.iterate();
-            while (try iter.next()) |entry| {
-                if (entry.kind == .File and isSupported(entry.name)) {
-                    const next_len = self.files.len + 1;
-                    try self.ensureCapacity(next_len * @sizeOf(FileInfo));
-
-                    self.files.len = next_len;
-                    self.files[next_len - 1] = FileInfo.init(dirname, entry.name);
-
-                    if (std.mem.eql(u8, entry.name, filename)) self.file_index = self.files.len - 1;
-                }
-            }
-        }
-
-        pub fn prev(self: *Self) bool {
-            if (self.files.len > 1) {
-                self.file_index = if (self.file_index == 0) self.files.len - 1 else self.file_index - 1;
-                return true;
-            }
-            return false;
-        }
-
-        pub fn next(self: *Self) bool {
-            if (self.files.len > 1) {
-                self.file_index = if (self.file_index == self.files.len - 1) 0 else self.file_index + 1;
-                return true;
-            }
-            return false;
-        }
-
-        pub fn curr(self: *Self) ?[]const u8 {
-            if (self.files.len == 0) return null;
-            return self.files[self.file_index].name();
-        }
-
-        fn ensureCapacity(self: *Self, required_bytes: usize) !void {
-            if (capacity_bytes < required_bytes) return error.OutOfMemory;
-
-            const to_commit = std.mem.alignForward(required_bytes, std.mem.page_size);
-
-            if (to_commit > self.committed_bytes) {
-                assert(to_commit <= capacity_bytes);
-
-                _ = try win32.VirtualAlloc(
-                    @intToPtr(win32.LPVOID, @ptrToInt(self.bytes) + self.committed_bytes),
-                    to_commit - self.committed_bytes,
-                    win32.MEM_COMMIT,
-                    win32.PAGE_READWRITE,
-                );
-
-                self.committed_bytes = to_commit;
-            }
-        }
-    };
-
     const Command = enum(u32) {
         Open = 1,
     };
 
     pub fn main() anyerror!void {
         // Init memory block
-        files = try Browser.init();
+        const alignment = @alignOf(FileInfo);
+
+        committed_bytes = 0;
+        bytes = @ptrCast([*]u8, try win32.VirtualAlloc(
+            null,
+            capacity_bytes,
+            win32.MEM_RESERVE,
+            win32.PAGE_NOACCESS,
+        ));
+
+        if (!std.mem.isAligned(@ptrToInt(bytes), alignment)) {
+            return error.MisalignedAddress;
+        }
+
+        assert(std.mem.isAligned(@ptrToInt(bytes), 2));
+
+        // Prepare files list
+        files.ptr = @ptrCast([*]FileInfo, @alignCast(alignment, bytes));
+        files.len = 0;
+        file_index = 0;
 
         // Register window class
         const hinst = win32.getCurrentInstance();
@@ -435,7 +335,7 @@ const app = struct {
                 const len = try std.unicode.utf16leToUtf8(&path8, path16);
 
                 try load(win, path8[0..len]);
-                try files.updateFiles(path8[0..len]);
+                try updateFiles(path8[0..len]);
             }
         }
 
@@ -496,8 +396,10 @@ const app = struct {
                 }
             },
             win32.WM_KEYDOWN => {
-                if ((wparam == 0x25 and files.prev()) or (wparam == 0x27 and files.next())) {
-                    try load(win, files.curr() orelse unreachable);
+                if ((wparam == 0x25 and browsePrev()) or (wparam == 0x27 and browseNext())) {
+                    assert(files.len > 1);
+                    const file = &files[file_index];
+                    try load(win, file.buf[0..file.len]);
                 }
             },
             else => return false,
@@ -597,7 +499,7 @@ const app = struct {
 
             try load(win, path);
 
-            try files.updateFiles(path);
+            try updateFiles(path);
         }
     }
 
@@ -645,6 +547,79 @@ const app = struct {
         );
 
         _ = try win32.messageBox(win, out, app_name, 0);
+    }
+
+    pub fn updateFiles(path: []const u8) !void {
+        // Clear current list
+        files.len = 0;
+        file_index = 0;
+
+        // Split path in file and directory names
+        const sep = std.mem.lastIndexOfScalar(u8, path, '\\') orelse return error.InvalidPath;
+        const dirname = path[0 .. sep + 1];
+        const filename = path[sep + 1 ..];
+
+        // Iterate
+        var dir = try std.fs.openIterableDirAbsolute(dirname, .{});
+        defer dir.close();
+
+        var iter = dir.iterate();
+        while (try iter.next()) |entry| {
+            if (entry.kind == .File and isSupported(entry.name)) {
+                const index = files.len;
+
+                // Push file to the list
+                files.len = index + 1;
+                try ensureCapacity(files.len * @sizeOf(FileInfo));
+
+                // Update browse index
+                if (std.mem.eql(u8, entry.name, filename)) file_index = index;
+
+                // Copy full path
+                var file = &files[index];
+                file.len = dirname.len + entry.name.len;
+
+                assert(file.len < file.buf.len);
+
+                std.mem.copy(u8, file.buf[0..], dirname);
+                std.mem.copy(u8, file.buf[dirname.len..], entry.name);
+            }
+        }
+    }
+
+    pub fn browsePrev() bool {
+        if (files.len > 1) {
+            file_index = if (file_index == 0) files.len - 1 else file_index - 1;
+            return true;
+        }
+        return false;
+    }
+
+    pub fn browseNext() bool {
+        if (files.len > 1) {
+            file_index = if (file_index == files.len - 1) 0 else file_index + 1;
+            return true;
+        }
+        return false;
+    }
+
+    fn ensureCapacity(required_bytes: usize) !void {
+        if (capacity_bytes < required_bytes) return error.OutOfMemory;
+
+        const to_commit = std.mem.alignForward(required_bytes, std.mem.page_size);
+
+        if (to_commit > committed_bytes) {
+            assert(to_commit <= capacity_bytes);
+
+            _ = try win32.VirtualAlloc(
+                @intToPtr(win32.LPVOID, @ptrToInt(bytes) + committed_bytes),
+                to_commit - committed_bytes,
+                win32.MEM_COMMIT,
+                win32.PAGE_READWRITE,
+            );
+
+            committed_bytes = to_commit;
+        }
     }
 };
 
