@@ -90,7 +90,21 @@ const app = struct {
     // 32767. This is quite large for static buffers, so we - temporarily - settle
     // to a smaller limit
     const max_path_size = 1024;
-    const extensions = "*.bmp;*.png;*.jpg;*.jpeg;*.tiff";
+
+    // NOTE (Matteo): This looks a bit strange but is a cool way to build the
+    // list of supported extensions and the dialog filter string at comptime
+    const filter = "*.bmp;*.png;*.jpg;*.jpeg;*.tiff";
+    const extensions = init: {
+        comptime var temp: [5][]const u8 = undefined;
+        comptime var tokens = std.mem.tokenize(u8, filter, ";*");
+        comptime var index: usize = 0;
+        inline while (tokens.next()) |token| {
+            temp[index] = token;
+            index += 1;
+        }
+        assert(index == temp.len);
+        break :init temp;
+    };
 
     // TODO (Matteo): Review.
     const capacity_bytes: usize = 1024 * 1024 * 1024;
@@ -413,7 +427,7 @@ const app = struct {
         try gdip.checkStatus(gdip.createFromHDC(pb.dc, &gfx));
         defer gdip.checkStatus(gdip.deleteGraphics(gfx)) catch unreachable;
 
-        try gdip.checkStatus(gdip.graphicsClear(gfx, 0xff000000));
+        try gdip.checkStatus(gdip.graphicsClear(gfx, 0xFFF0F0F0));
 
         if (image) |bmp| {
             // Compute dimensions
@@ -490,7 +504,7 @@ const app = struct {
             .hwndOwner = win,
             .lpstrFile = ptr,
             .nMaxFile = @intCast(u32, buf16.len),
-            .lpstrFilter = L("Image files\x00") ++ extensions ++ L("\x00"),
+            .lpstrFilter = L("Image files\x00") ++ filter ++ L("\x00"),
         };
 
         if (try win32.getOpenFileName(&ofn)) {
@@ -517,9 +531,7 @@ const app = struct {
 
         assert(ext[ext.len - 1] != 0);
 
-        // TODO (Matteo): Store tokens at startup
-        var tokens = std.mem.tokenize(u8, extensions, ";*");
-        while (tokens.next()) |token| {
+        for (extensions) |token| {
             if (std.ascii.eqlIgnoreCase(token, ext)) return true;
         }
 
