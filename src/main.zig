@@ -26,7 +26,12 @@ pub fn panic(err: []const u8, maybe_trace: ?*std.builtin.StackTrace, ret_addr: ?
     // NOTE (Matteo): Custom panic handler that reports the error via message box
     // This is because win32 apps don't have an associated console by default,
     // so stderr "is not visible".
-    var buf = getTempBuf(u8);
+
+    const static = struct {
+        // NOTE (Matteo): Kept static to allow for growing it without risk of smashing the stack
+        var buf: [8192]u8 align(@alignOf(usize)) = undefined;
+    };
+    var buf = TempBuf(u8).init(&static.buf);
 
     {
         var writer = buf.writer();
@@ -69,14 +74,6 @@ fn TempBuf(comptime T: type) type {
     return std.fifo.LinearFifo(T, .Slice);
 }
 
-fn getTempBuf(comptime T: type) TempBuf(T) {
-    const static = struct {
-        // NOTE (Matteo): Kept static to allow for growing it without risk of smashing the stack
-        var buf: [8192]u8 align(@alignOf(usize)) = undefined;
-    };
-    return TempBuf(T).init(std.mem.bytesAsSlice(T, &static.buf));
-}
-
 fn getWStr(buf: *TempBuf(u16)) [:0]const u16 {
     buf.writeItem(0) catch unreachable;
     const s = buf.readableSlice(0);
@@ -106,22 +103,6 @@ const app = struct {
         break :init temp;
     };
 
-    // TODO (Matteo): Review.
-    const capacity_bytes: usize = 1024 * 1024 * 1024;
-
-    var bytes: [*]u8 = undefined;
-    var committed_bytes: usize = 0;
-
-    var files: []FileInfo = undefined;
-    var file_index: usize = 0;
-
-    var image: ?*gdip.Image = null;
-
-    const FileInfo = struct {
-        buf: [max_path_size]u8 = undefined,
-        len: usize = 0,
-    };
-
     /// Provides the entire memory layout for the application (with the exception
     /// of decoded images which are handled internally by GDI+)
     const Memory = struct {
@@ -129,114 +110,10 @@ const app = struct {
         const capacity: usize = 1024 * 1024 * 1024;
 
         bytes: [*]u8,
+        volatile_start: usize = 0,
         volatile_end: usize = 0,
         string_start: usize = capacity,
         scratch_stack: usize = 0,
-
-        // Persistent allocation are kept at the bottom of the stack and never
-        // freed, so they must be performed before any volatile  ones
-        pub fn persistentAlloc(self: *Memory, comptime T: type, size: usize) []T {
-            _ = self;
-            _ = size;
-            @compileError("Not implemented");
-        }
-
-        // Volatile allocation
-        pub fn alloc(self: *Memory, comptime T: type, size: usize) ![]T {
-            const next_pos = std.mem.alignForward(self.volatile_end, @alignOf(T));
-
-            const avail = self.string_start - next_pos;
-            if (avail < size) return error.OutOfMemory;
-
-            const curr_commit = std.mem.alignForward(self.volatile_end, std.mem.page_size);
-            const next_commit = std.mem.alignForward(next_pos, std.mem.page_size);
-
-            if (next_commit > curr_commit) {
-                _ = try win32.VirtualAlloc(
-                    @ptrCast(win32.LPVOID, self.bytes + next_commit),
-                    next_commit - curr_commit,
-                    win32.MEM_COMMIT,
-                    win32.PAGE_READWRITE,
-                );
-            }
-
-            self.volatile_end = next_pos + size;
-            return self.bytes[next_pos..][0..size];
-        }
-
-        pub fn isLastAlloc(self: *Memory, mem: anytype) bool {
-            const end = @ptrCast(*u8, mem.ptr + mem.len);
-            return (end == self.bytes + self.volatile_end);
-        }
-
-        pub fn resize(self: *Memory, comptime T: type, mem: *[]T, size: usize) bool {
-            if (!self.isLastAlloc(mem.*)) return false;
-
-            if (size < mem.len) {
-                assert(self.volatile_end >= size);
-                self.volatile_end -= size;
-            } else {
-                const avail = self.string_start - self.volatile_end;
-                if (avail < size) return error.OutOfMemory;
-
-                const next_pos = self.volatile_end + size;
-                const curr_commit = std.mem.alignForward(self.volatile_end, std.mem.page_size);
-                const next_commit = std.mem.alignForward(next_pos, std.mem.page_size);
-
-                if (next_commit > curr_commit) {
-                    _ = try win32.VirtualAlloc(
-                        @ptrCast(win32.LPVOID, self.bytes + next_commit),
-                        next_commit - curr_commit,
-                        win32.MEM_COMMIT,
-                        win32.PAGE_READWRITE,
-                    );
-                }
-
-                self.volatile_end = next_pos;
-            }
-
-            mem.len = size;
-            return true;
-        }
-
-        // TODO (Matteo): Are scratch and volatile allocs really different concepts?
-        // Temporary scratch storage allocated on top of the stack - its main purpose
-        // is to provide storage for reading image files, before decoding them.
-        const Scratch = struct {};
-        pub fn scratchAlloc(comptime T: type, size: usize) Scratch {
-            _ = T;
-            _ = size;
-            @compileError("Not implemented");
-        }
-        pub fn scratchFree(scratch: Scratch) void {
-            _ = scratch;
-            @compileError("Not implemented");
-        }
-
-        // Storage stack dedicated to variable length strings, grows from the bottom
-        // of the memory block - this specialization is useful to allow the volatile
-        // storage to be used for dynamic arrays of homogenous structs, and using
-        // the minimum required space for strings
-        pub fn stringAlloc(self: *Memory, size: usize) ![]u8 {
-            const avail = self.string_start - self.volatile_end;
-            if (avail < size) return error.OutOfMemory;
-
-            const next_pos = self.string_start - size;
-            const curr_commit = std.mem.alignBackward(self.string_start, std.mem.page_size);
-            const next_commit = std.mem.alignBackward(next_pos, std.mem.page_size);
-
-            if (next_commit < curr_commit) {
-                _ = try win32.VirtualAlloc(
-                    @ptrCast(win32.LPVOID, self.bytes + next_commit),
-                    curr_commit - next_commit,
-                    win32.MEM_COMMIT,
-                    win32.PAGE_READWRITE,
-                );
-            }
-
-            self.string_start = next_pos;
-            return self.bytes[self.string_start..][0..size];
-        }
 
         pub fn init() !Memory {
             // Allocate block
@@ -248,41 +125,173 @@ const app = struct {
             )) };
 
             assert(std.mem.isAligned(@ptrToInt(self.bytes), std.mem.page_size));
+            assert(std.mem.isAligned(@ptrToInt(self.bytes), @alignOf(FileInfo)));
+
+            const curr_commit = std.mem.alignForward(self.volatile_end, std.mem.page_size);
+            assert(curr_commit == 0);
 
             return self;
         }
 
         pub fn clear(self: *Memory) void {
             assert(self.scratch_stack == 0);
+
+            // Decommit excess to catch rogue memory usage
+            const curr_commit = std.mem.alignForward(self.volatile_end, std.mem.page_size);
+            const next_commit = std.mem.alignForward(self.volatile_start, std.mem.page_size);
+
+            if (next_commit < curr_commit) {
+                win32.VirtualFree(
+                    @ptrCast(win32.LPVOID, self.bytes + next_commit),
+                    curr_commit - next_commit,
+                    win32.MEM_DECOMMIT,
+                );
+            }
+
+            self.volatile_end = self.volatile_start;
+
+            if (self.string_start < capacity) {
+                const string_commit = std.mem.alignBackward(self.string_start, std.mem.page_size);
+
+                win32.VirtualFree(
+                    @ptrCast(win32.LPVOID, self.bytes + string_commit),
+                    capacity - string_commit,
+                    win32.MEM_DECOMMIT,
+                );
+
+                self.string_start = capacity;
+            }
         }
+
+        // Persistent allocation are kept at the bottom of the stack and never
+        // freed, so they must be performed before any volatile  ones
+        pub fn persistentAlloc(self: *Memory, comptime T: type, size: usize) ![]T {
+            if (self.volatile_end > self.volatile_start) return error.OutOfMemory;
+
+            _ = size;
+            @compileError("Not implemented");
+        }
+
+        // Volatile allocation
+        pub fn alloc(self: *Memory, comptime T: type, count: usize) ![]align(@alignOf(T)) T {
+            return self.allocAlign(T, @alignOf(T), count);
+        }
+
+        pub fn allocAlign(self: *Memory, comptime T: type, comptime alignment: u29, count: usize) ![]align(alignment) T {
+            const size = count * @sizeOf(T);
+
+            const mem_start = std.mem.alignForward(self.volatile_end, alignment);
+            const mem_end = mem_start + size;
+
+            const avail = self.string_start - mem_start;
+            if (avail < size) return error.OutOfMemory;
+
+            const curr_commit = std.mem.alignForward(self.volatile_end, std.mem.page_size);
+            const next_commit = std.mem.alignForward(mem_end, std.mem.page_size);
+
+            if (next_commit > curr_commit) {
+                _ = try win32.VirtualAlloc(
+                    @ptrCast(win32.LPVOID, self.bytes + curr_commit),
+                    next_commit - curr_commit,
+                    win32.MEM_COMMIT,
+                    win32.PAGE_READWRITE,
+                );
+            }
+
+            self.volatile_end = mem_end;
+
+            assert(@divExact(mem_end - mem_start, @sizeOf(T)) == count);
+
+            const ptr = @ptrCast([*]T, @alignCast(alignment, self.bytes + mem_start));
+            return ptr[0..count];
+        }
+
+        pub fn isLastAlloc(self: *Memory, comptime T: type, mem: []T) bool {
+            const size = mem.len * @sizeOf(T);
+            return @ptrToInt(self.bytes + self.volatile_end) - size == @ptrToInt(mem.ptr);
+        }
+
+        pub fn resize(self: *Memory, comptime T: type, mem: *[]T, count: usize) !void {
+            if (!self.isLastAlloc(T, mem.*)) return error.NotLastAlloc;
+
+            if (count < mem.len) {
+                self.volatile_end -= @sizeOf(T) * (mem.len - count);
+            } else {
+                const size = @sizeOf(T) * (count - mem.len);
+                const avail = self.string_start - self.volatile_end;
+                if (avail < size) return error.OutOfMemory;
+
+                const next_pos = self.volatile_end + size;
+                const curr_commit = std.mem.alignForward(self.volatile_end, std.mem.page_size);
+                const next_commit = std.mem.alignForward(next_pos, std.mem.page_size);
+
+                if (next_commit > curr_commit) {
+                    _ = try win32.VirtualAlloc(
+                        @ptrCast(win32.LPVOID, self.bytes + curr_commit),
+                        next_commit - curr_commit,
+                        win32.MEM_COMMIT,
+                        win32.PAGE_READWRITE,
+                    );
+                }
+
+                self.volatile_end = next_pos;
+            }
+
+            mem.len = count;
+        }
+
+        // Storage stack dedicated to variable length strings, grows from the bottom
+        // of the memory block - this specialization is useful to allow the volatile
+        // storage to be used for dynamic arrays of homogenous structs, and using
+        // the minimum required space for strings
+        pub fn stringAlloc(self: *Memory, size: usize) ![]u8 {
+            const avail = self.string_start - self.volatile_end;
+            if (avail < size) return error.OutOfMemory;
+
+            const end = self.string_start;
+            const start = end - size;
+
+            const curr_commit = std.mem.alignBackward(end, std.mem.page_size);
+            const next_commit = std.mem.alignBackward(start, std.mem.page_size);
+
+            if (next_commit < curr_commit) {
+                _ = try win32.VirtualAlloc(
+                    @ptrCast(win32.LPVOID, self.bytes + next_commit),
+                    curr_commit - next_commit,
+                    win32.MEM_COMMIT,
+                    win32.PAGE_READWRITE,
+                );
+            }
+
+            self.string_start = start;
+            return self.bytes[start..end];
+        }
+
+        // TODO (Matteo): Improve temporary allocation
+        fn getTempBuf(self: *Memory, comptime T: type) TempBuf(T) {
+            const bytes = self.allocAlign(u8, @alignOf(T), 1024 * 1024) catch unreachable;
+            return TempBuf(T).init(std.mem.bytesAsSlice(T, bytes));
+        }
+    };
+
+    const FileInfo = struct {
+        name: []u8,
     };
 
     const Command = enum(u32) {
         Open = 1,
     };
 
+    var memory: Memory = undefined;
+
+    var files: []FileInfo = &[_]FileInfo{};
+    var file_index: usize = 0;
+
+    var image: ?*gdip.Image = null;
+
     pub fn main() anyerror!void {
         // Init memory block
-        const alignment = @alignOf(FileInfo);
-
-        committed_bytes = 0;
-        bytes = @ptrCast([*]u8, try win32.VirtualAlloc(
-            null,
-            capacity_bytes,
-            win32.MEM_RESERVE,
-            win32.PAGE_NOACCESS,
-        ));
-
-        if (!std.mem.isAligned(@ptrToInt(bytes), alignment)) {
-            return error.MisalignedAddress;
-        }
-
-        assert(std.mem.isAligned(@ptrToInt(bytes), 2));
-
-        // Prepare files list
-        files.ptr = @ptrCast([*]FileInfo, @alignCast(alignment, bytes));
-        files.len = 0;
-        file_index = 0;
+        memory = try Memory.init();
 
         // Register window class
         const hinst = win32.getCurrentInstance();
@@ -413,7 +422,7 @@ const app = struct {
                 if ((wparam == 0x25 and browsePrev()) or (wparam == 0x27 and browseNext())) {
                     assert(files.len > 1);
                     const file = &files[file_index];
-                    try load(win, file.buf[0..file.len]);
+                    try load(win, file.name);
                 }
             },
             else => return false,
@@ -467,7 +476,7 @@ const app = struct {
     fn load(win: win32.HWND, file_name_utf8: []const u8) !void {
         // TODO (Matteo): Avoid some UTF8 <=> UTF16 conversion?
 
-        var buf = getTempBuf(u16);
+        var buf = memory.getTempBuf(u16);
 
         // Prepend string for composing the title
         try buf.write(app_name);
@@ -539,7 +548,7 @@ const app = struct {
     }
 
     fn invalidFile(win: win32.HWND, file_name: [:0]const u16) gdip.Error!void {
-        var buf = getTempBuf(u16);
+        var buf = memory.getTempBuf(u16);
         try buf.write(L("Invalid image file: "));
         try buf.write(file_name);
         const msg = getWStr(&buf);
@@ -547,7 +556,7 @@ const app = struct {
     }
 
     fn messageBox(win: ?win32.HWND, comptime fmt: []const u8, args: anytype) !void {
-        var buf = getTempBuf(u8);
+        var buf = memory.getTempBuf(u8);
         var w = buf.writer();
 
         try w.print(fmt, args);
@@ -565,6 +574,7 @@ const app = struct {
         // Clear current list
         files.len = 0;
         file_index = 0;
+        memory.clear();
 
         // Split path in file and directory names
         const sep = std.mem.lastIndexOfScalar(u8, path, '\\') orelse return error.InvalidPath;
@@ -581,20 +591,23 @@ const app = struct {
                 const index = files.len;
 
                 // Push file to the list
-                files.len = index + 1;
-                try ensureCapacity(files.len * @sizeOf(FileInfo));
+                if (index == 0) {
+                    files = try memory.alloc(FileInfo, 1);
+                } else {
+                    try memory.resize(FileInfo, &files, index + 1);
+                }
+
+                assert(files.len == index + 1);
 
                 // Update browse index
                 if (std.mem.eql(u8, entry.name, filename)) file_index = index;
 
                 // Copy full path
                 var file = &files[index];
-                file.len = dirname.len + entry.name.len;
+                file.name = try memory.stringAlloc(dirname.len + entry.name.len);
 
-                assert(file.len < file.buf.len);
-
-                std.mem.copy(u8, file.buf[0..], dirname);
-                std.mem.copy(u8, file.buf[dirname.len..], entry.name);
+                std.mem.copy(u8, file.name[0..dirname.len], dirname);
+                std.mem.copy(u8, file.name[dirname.len..], entry.name);
             }
         }
     }
@@ -613,25 +626,6 @@ const app = struct {
             return true;
         }
         return false;
-    }
-
-    fn ensureCapacity(required_bytes: usize) !void {
-        if (capacity_bytes < required_bytes) return error.OutOfMemory;
-
-        const to_commit = std.mem.alignForward(required_bytes, std.mem.page_size);
-
-        if (to_commit > committed_bytes) {
-            assert(to_commit <= capacity_bytes);
-
-            _ = try win32.VirtualAlloc(
-                @intToPtr(win32.LPVOID, @ptrToInt(bytes) + committed_bytes),
-                to_commit - committed_bytes,
-                win32.MEM_COMMIT,
-                win32.PAGE_READWRITE,
-            );
-
-            committed_bytes = to_commit;
-        }
     }
 };
 
