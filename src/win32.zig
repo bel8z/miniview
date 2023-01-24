@@ -394,6 +394,26 @@ extern "uxtheme" fn BufferedPaintClear(
     prc: *const win32.RECT,
 ) callconv(win32.WINAPI) win32.HRESULT;
 
+//=== Drawing ===//
+
+pub const BkModes = enum(c_int) { Transparent = 1, Opaque = 2 };
+
+pub extern "gdi32" fn SetBkMode(
+    hdc: win32.HDC,
+    mode: BkModes,
+) c_int;
+
+pub extern "gdi32" fn ExtTextOutW(
+    hdc: win32.HDC,
+    x: c_int,
+    y: c_int,
+    options: c_uint,
+    lprect: ?*const win32.RECT,
+    lpString: win32.LPCWSTR,
+    c: c_int,
+    lpDx: ?*const c_int,
+) callconv(win32.WINAPI) c_int;
+
 //=== File dialogs ===//
 
 pub const OPENFILENAMEW = extern struct {

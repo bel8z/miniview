@@ -431,7 +431,7 @@ const app = struct {
         return true;
     }
 
-    fn paint(pb: win32.PaintBuffer) gdip.Error!void {
+    fn paint(pb: win32.PaintBuffer) !void {
         var gfx: *gdip.Graphics = undefined;
         try gdip.checkStatus(gdip.createFromHDC(pb.dc, &gfx));
         defer gdip.checkStatus(gdip.deleteGraphics(gfx)) catch unreachable;
@@ -470,6 +470,14 @@ const app = struct {
                 draw_w,
                 draw_h,
             ));
+        }
+
+        if (builtin.mode == .Debug) {
+            var buf = memory.getTempBuf(u16);
+            try buf.write(L("Debug"));
+            const text = getWStr(&buf);
+            _ = win32.SetBkMode(pb.dc, .Transparent);
+            _ = win32.ExtTextOutW(pb.dc, 1, 1, 0, null, text.ptr, @intCast(c_int, text.len), null);
         }
     }
 
