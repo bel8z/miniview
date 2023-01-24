@@ -398,6 +398,11 @@ extern "uxtheme" fn BufferedPaintClear(
 
 pub const BkModes = enum(c_int) { Transparent = 1, Opaque = 2 };
 
+pub const SIZE = extern struct {
+    cx: i32,
+    cy: i32,
+};
+
 pub extern "gdi32" fn SetBkMode(
     hdc: win32.HDC,
     mode: BkModes,
@@ -413,6 +418,13 @@ pub extern "gdi32" fn ExtTextOutW(
     c: c_int,
     lpDx: ?*const c_int,
 ) callconv(win32.WINAPI) c_int;
+
+pub extern "gdi32" fn GetTextExtentPoint32W(
+    hdc: win32.HDC,
+    lpString: win32.LPCWSTR,
+    c: c_int,
+    psizl: *SIZE,
+) c_int;
 
 //=== File dialogs ===//
 

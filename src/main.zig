@@ -80,6 +80,18 @@ fn getWStr(buf: *TempBuf(u16)) [:0]const u16 {
     return s[0 .. s.len - 1 :0];
 }
 
+fn formatWstr(buf: *TempBuf(u8), comptime fmt: []const u8, args: anytype) ![:0]const u16 {
+    var w = buf.writer();
+
+    try w.print(fmt, args);
+
+    var alloc = std.heap.FixedBufferAllocator.init(buf.writableSlice(0));
+    return std.unicode.utf8ToUtf16LeWithNull(
+        alloc.allocator(),
+        buf.readableSlice(0),
+    );
+}
+
 //=== Actual application ===//
 
 const app = struct {
@@ -473,12 +485,31 @@ const app = struct {
         }
 
         if (builtin.mode == .Debug) {
-            var buf = memory.getTempBuf(u16);
-            try buf.write(L("Debug"));
-            const text = getWStr(&buf);
-            _ = win32.SetBkMode(pb.dc, .Transparent);
-            _ = win32.ExtTextOutW(pb.dc, 1, 1, 0, null, text.ptr, @intCast(c_int, text.len), null);
+            var y: i32 = 0;
+            y = debugText(pb, y, "Debug mode", .{});
+            y = debugText(pb, y, "# files: {}", .{files.len});
+            y = debugText(pb, y, "File size: {}", .{@sizeOf(FileInfo)});
+            y = debugText(pb, y, "Persistent memory: {}", .{memory.volatile_start});
+            y = debugText(pb, y, "Volatile memory: {}", .{memory.volatile_end - memory.volatile_start});
+            y = debugText(pb, y, "String memory: {}", .{Memory.capacity - memory.string_start});
         }
+    }
+
+    fn debugText(pb: win32.PaintBuffer, y: i32, comptime fmt: []const u8, args: anytype) i32 {
+        _ = win32.SetBkMode(pb.dc, .Transparent);
+
+        var buf = memory.getTempBuf(u8);
+        const text = formatWstr(&buf, fmt, args) catch return y;
+        const text_len = @intCast(c_int, text.len);
+
+        var cur_y = y + 1;
+        _ = win32.ExtTextOutW(pb.dc, 1, cur_y, 0, null, text.ptr, text_len, null);
+
+        var size: win32.SIZE = undefined;
+        _ = win32.GetTextExtentPoint32W(pb.dc, text.ptr, text_len, &size);
+        cur_y += size.cy;
+
+        return cur_y;
     }
 
     fn load(win: win32.HWND, file_name_utf8: []const u8) !void {
@@ -565,16 +596,7 @@ const app = struct {
 
     fn messageBox(win: ?win32.HWND, comptime fmt: []const u8, args: anytype) !void {
         var buf = memory.getTempBuf(u8);
-        var w = buf.writer();
-
-        try w.print(fmt, args);
-
-        var alloc = std.heap.FixedBufferAllocator.init(buf.writableSlice(0));
-        const out = try std.unicode.utf8ToUtf16LeWithNull(
-            alloc.allocator(),
-            buf.readableSlice(0),
-        );
-
+        const out = try formatWstr(&buf, fmt, args);
         _ = try win32.messageBox(win, out, app_name, 0);
     }
 
