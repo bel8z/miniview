@@ -80,16 +80,11 @@ fn getWStr(buf: *TempBuf(u16)) [:0]const u16 {
     return s[0 .. s.len - 1 :0];
 }
 
-fn formatWstr(buf: *TempBuf(u8), comptime fmt: []const u8, args: anytype) ![:0]const u16 {
-    var w = buf.writer();
+fn formatWstr(buf: []u8, comptime fmt: []const u8, args: anytype) ![:0]const u16 {
+    const str = try std.fmt.bufPrint(buf, fmt, args);
 
-    try w.print(fmt, args);
-
-    var alloc = std.heap.FixedBufferAllocator.init(buf.writableSlice(0));
-    return std.unicode.utf8ToUtf16LeWithNull(
-        alloc.allocator(),
-        buf.readableSlice(0),
-    );
+    var alloc = std.heap.FixedBufferAllocator.init(buf[str.len..]);
+    return std.unicode.utf8ToUtf16LeWithNull(alloc.allocator(), str);
 }
 
 //=== Actual application ===//
@@ -138,9 +133,7 @@ const app = struct {
 
             assert(std.mem.isAligned(@ptrToInt(self.bytes), std.mem.page_size));
             assert(std.mem.isAligned(@ptrToInt(self.bytes), @alignOf(FileInfo)));
-
-            const curr_commit = std.mem.alignForward(self.volatile_end, std.mem.page_size);
-            assert(curr_commit == 0);
+            assert(std.mem.alignForward(self.volatile_end, std.mem.page_size) == 0);
 
             return self;
         }
@@ -148,19 +141,7 @@ const app = struct {
         pub fn clear(self: *Memory) void {
             assert(self.scratch_stack == 0);
 
-            // Decommit excess to catch rogue memory usage
-            const curr_commit = std.mem.alignForward(self.volatile_end, std.mem.page_size);
-            const next_commit = std.mem.alignForward(self.volatile_start, std.mem.page_size);
-
-            if (next_commit < curr_commit) {
-                win32.VirtualFree(
-                    @ptrCast(win32.LPVOID, self.bytes + next_commit),
-                    curr_commit - next_commit,
-                    win32.MEM_DECOMMIT,
-                );
-            }
-
-            self.volatile_end = self.volatile_start;
+            self.shrinkTo(self.volatile_start);
 
             if (self.string_start < capacity) {
                 const string_commit = std.mem.alignBackward(self.string_start, std.mem.page_size);
@@ -177,11 +158,13 @@ const app = struct {
 
         // Persistent allocation are kept at the bottom of the stack and never
         // freed, so they must be performed before any volatile  ones
-        pub fn persistentAlloc(self: *Memory, comptime T: type, size: usize) ![]T {
+        pub fn persistentAlloc(self: *Memory, comptime T: type, count: usize) ![]T {
             if (self.volatile_end > self.volatile_start) return error.OutOfMemory;
 
-            _ = size;
-            @compileError("Not implemented");
+            const mem = try self.alloc(T, count);
+            self.volatile_start = self.volatile_end;
+
+            return mem;
         }
 
         // Volatile allocation
@@ -198,17 +181,10 @@ const app = struct {
             const avail = self.string_start - mem_start;
             if (avail < size) return error.OutOfMemory;
 
-            const curr_commit = std.mem.alignForward(self.volatile_end, std.mem.page_size);
-            const next_commit = std.mem.alignForward(mem_end, std.mem.page_size);
-
-            if (next_commit > curr_commit) {
-                _ = try win32.VirtualAlloc(
-                    @ptrCast(win32.LPVOID, self.bytes + curr_commit),
-                    next_commit - curr_commit,
-                    win32.MEM_COMMIT,
-                    win32.PAGE_READWRITE,
-                );
-            }
+            try self.commit(
+                std.mem.alignForward(self.volatile_end, std.mem.page_size),
+                std.mem.alignForward(mem_end, std.mem.page_size),
+            );
 
             self.volatile_end = mem_end;
 
@@ -234,17 +210,11 @@ const app = struct {
                 if (avail < size) return error.OutOfMemory;
 
                 const next_pos = self.volatile_end + size;
-                const curr_commit = std.mem.alignForward(self.volatile_end, std.mem.page_size);
-                const next_commit = std.mem.alignForward(next_pos, std.mem.page_size);
 
-                if (next_commit > curr_commit) {
-                    _ = try win32.VirtualAlloc(
-                        @ptrCast(win32.LPVOID, self.bytes + curr_commit),
-                        next_commit - curr_commit,
-                        win32.MEM_COMMIT,
-                        win32.PAGE_READWRITE,
-                    );
-                }
+                try self.commit(
+                    std.mem.alignForward(self.volatile_end, std.mem.page_size),
+                    std.mem.alignForward(next_pos, std.mem.page_size),
+                );
 
                 self.volatile_end = next_pos;
             }
@@ -263,26 +233,75 @@ const app = struct {
             const end = self.string_start;
             const start = end - size;
 
-            const curr_commit = std.mem.alignBackward(end, std.mem.page_size);
-            const next_commit = std.mem.alignBackward(start, std.mem.page_size);
-
-            if (next_commit < curr_commit) {
-                _ = try win32.VirtualAlloc(
-                    @ptrCast(win32.LPVOID, self.bytes + next_commit),
-                    curr_commit - next_commit,
-                    win32.MEM_COMMIT,
-                    win32.PAGE_READWRITE,
-                );
-            }
+            try self.commit(
+                std.mem.alignBackward(start, std.mem.page_size),
+                std.mem.alignBackward(end, std.mem.page_size),
+            );
 
             self.string_start = start;
             return self.bytes[start..end];
         }
 
-        // TODO (Matteo): Improve temporary allocation
-        fn getTempBuf(self: *Memory, comptime T: type) TempBuf(T) {
-            const bytes = self.allocAlign(u8, @alignOf(T), 1024 * 1024) catch unreachable;
-            return TempBuf(T).init(std.mem.bytesAsSlice(T, bytes));
+        const ScratchScope = struct { id: usize, pos: usize };
+
+        pub fn beginScratch(self: *Memory) ScratchScope {
+            self.scratch_stack += 1;
+            return .{ .id = self.scratch_stack, .pos = self.volatile_end };
+        }
+
+        pub fn endScratch(self: *Memory, scope: ScratchScope) void {
+            assert(scope.id == self.scratch_stack);
+            assert(scope.id > 0);
+            self.scratch_stack = scope.id - 1;
+            self.shrinkTo(scope.pos);
+        }
+
+        fn shrinkTo(self: *Memory, pos: usize) void {
+            assert(pos <= self.volatile_end);
+
+            // Decommit excess to catch rogue memory usage
+            const curr_commit = std.mem.alignForward(self.volatile_end, std.mem.page_size);
+            const next_commit = std.mem.alignForward(pos, std.mem.page_size);
+
+            if (next_commit < curr_commit) {
+                win32.VirtualFree(
+                    @ptrCast(win32.LPVOID, self.bytes + next_commit),
+                    curr_commit - next_commit,
+                    win32.MEM_DECOMMIT,
+                );
+            }
+
+            self.volatile_end = pos;
+        }
+
+        fn commit(self: *Memory, low: usize, high: usize) !void {
+            if (high > low) {
+                _ = try win32.VirtualAlloc(
+                    @ptrCast(win32.LPVOID, self.bytes + low),
+                    high - low,
+                    win32.MEM_COMMIT,
+                    win32.PAGE_READWRITE,
+                );
+            }
+        }
+
+        pub inline fn persistentSize(self: *const Memory) usize {
+            return self.volatile_start;
+        }
+
+        pub inline fn volatileSize(self: *const Memory) usize {
+            return self.volatile_end - self.volatile_start;
+        }
+
+        pub inline fn stringSize(self: *const Memory) usize {
+            return capacity - self.string_start;
+        }
+
+        pub inline fn committedSize(self: *const Memory) usize {
+            const volatile_commit = std.mem.alignForward(self.volatile_end, std.mem.page_size);
+            const string_commit = std.mem.alignBackward(self.string_start, std.mem.page_size);
+
+            return volatile_commit + capacity - string_commit;
         }
     };
 
@@ -301,9 +320,15 @@ const app = struct {
 
     var image: ?*gdip.Image = null;
 
+    var debug_buf: []u8 = &[_]u8{};
+
     pub fn main() anyerror!void {
         // Init memory block
         memory = try Memory.init();
+
+        if (builtin.mode == .Debug) {
+            debug_buf = try memory.persistentAlloc(u8, 4096);
+        }
 
         // Register window class
         const hinst = win32.getCurrentInstance();
@@ -484,38 +509,15 @@ const app = struct {
             ));
         }
 
-        if (builtin.mode == .Debug) {
-            var y: i32 = 0;
-            y = debugText(pb, y, "Debug mode", .{});
-            y = debugText(pb, y, "# files: {}", .{files.len});
-            y = debugText(pb, y, "File size: {}", .{@sizeOf(FileInfo)});
-            y = debugText(pb, y, "Persistent memory: {}", .{memory.volatile_start});
-            y = debugText(pb, y, "Volatile memory: {}", .{memory.volatile_end - memory.volatile_start});
-            y = debugText(pb, y, "String memory: {}", .{Memory.capacity - memory.string_start});
-        }
-    }
-
-    fn debugText(pb: win32.PaintBuffer, y: i32, comptime fmt: []const u8, args: anytype) i32 {
-        _ = win32.SetBkMode(pb.dc, .Transparent);
-
-        var buf = memory.getTempBuf(u8);
-        const text = formatWstr(&buf, fmt, args) catch return y;
-        const text_len = @intCast(c_int, text.len);
-
-        var cur_y = y + 1;
-        _ = win32.ExtTextOutW(pb.dc, 1, cur_y, 0, null, text.ptr, text_len, null);
-
-        var size: win32.SIZE = undefined;
-        _ = win32.GetTextExtentPoint32W(pb.dc, text.ptr, text_len, &size);
-        cur_y += size.cy;
-
-        return cur_y;
+        if (builtin.mode == .Debug) debugInfo(pb);
     }
 
     fn load(win: win32.HWND, file_name_utf8: []const u8) !void {
         // TODO (Matteo): Avoid some UTF8 <=> UTF16 conversion?
 
-        var buf = memory.getTempBuf(u16);
+        const scratch = memory.beginScratch();
+        defer memory.endScratch(scratch);
+        var buf = TempBuf(u16).init(try memory.alloc(u16, max_path_size));
 
         // Prepend string for composing the title
         try buf.write(app_name);
@@ -587,16 +589,26 @@ const app = struct {
     }
 
     fn invalidFile(win: win32.HWND, file_name: [:0]const u16) gdip.Error!void {
-        var buf = memory.getTempBuf(u16);
-        try buf.write(L("Invalid image file: "));
-        try buf.write(file_name);
-        const msg = getWStr(&buf);
-        _ = try win32.messageBox(win, msg, app_name, 0);
+        const header = L("Invalid image file: ");
+        const len = header.len + file_name.len;
+
+        const scratch = memory.beginScratch();
+        defer memory.endScratch(scratch);
+        var buf = try memory.alloc(u16, len + 1);
+
+        std.mem.copy(u16, buf, header);
+        std.mem.copy(u16, buf[header.len..], file_name);
+        buf[len] = 0;
+
+        _ = try win32.messageBox(win, buf[0..len :0], app_name, 0);
     }
 
     fn messageBox(win: ?win32.HWND, comptime fmt: []const u8, args: anytype) !void {
-        var buf = memory.getTempBuf(u8);
-        const out = try formatWstr(&buf, fmt, args);
+        const scratch = memory.beginScratch();
+        defer memory.endScratch(scratch);
+        var buf = try memory.alloc(u8, 4096);
+
+        const out = try formatWstr(buf, fmt, args);
         _ = try win32.messageBox(win, out, app_name, 0);
     }
 
@@ -656,6 +668,33 @@ const app = struct {
             return true;
         }
         return false;
+    }
+
+    fn debugInfo(pb: win32.PaintBuffer) void {
+        var y: i32 = 0;
+        y = debugText(pb, y, debug_buf, "Debug mode", .{});
+        y = debugText(pb, y, debug_buf, "# files: {}", .{files.len});
+        y = debugText(pb, y, debug_buf, "Persistent memory: {}", .{memory.persistentSize()});
+        y = debugText(pb, y, debug_buf, "Volatile memory: {}", .{memory.volatileSize()});
+        y = debugText(pb, y, debug_buf, "String memory: {}", .{memory.stringSize()});
+        y = debugText(pb, y, debug_buf, "Total committed memory: {}", .{memory.committedSize()});
+        y = debugText(pb, y, debug_buf, "Scratch stack: {}", .{memory.scratch_stack});
+    }
+
+    fn debugText(pb: win32.PaintBuffer, y: i32, buf: []u8, comptime fmt: []const u8, args: anytype) i32 {
+        _ = win32.SetBkMode(pb.dc, .Transparent);
+
+        const text = formatWstr(buf, fmt, args) catch return y;
+        const text_len = @intCast(c_int, text.len);
+
+        var cur_y = y + 1;
+        _ = win32.ExtTextOutW(pb.dc, 1, cur_y, 0, null, text.ptr, text_len, null);
+
+        var size: win32.SIZE = undefined;
+        _ = win32.GetTextExtentPoint32W(pb.dc, text.ptr, text_len, &size);
+        cur_y += size.cy;
+
+        return cur_y;
     }
 };
 
