@@ -31,7 +31,7 @@ pub fn panic(err: []const u8, maybe_trace: ?*std.builtin.StackTrace, ret_addr: ?
         // NOTE (Matteo): Kept static to allow for growing it without risk of smashing the stack
         var buf: [8192]u8 align(@alignOf(usize)) = undefined;
     };
-    var buf = TempBuf(u8).init(&static.buf);
+    var buf = RingBuffer(u8).init(&static.buf);
 
     {
         var writer = buf.writer();
@@ -70,21 +70,8 @@ pub fn panic(err: []const u8, maybe_trace: ?*std.builtin.StackTrace, ret_addr: ?
     std.os.abort();
 }
 
-fn TempBuf(comptime T: type) type {
+fn RingBuffer(comptime T: type) type {
     return std.fifo.LinearFifo(T, .Slice);
-}
-
-fn getWStr(buf: *TempBuf(u16)) [:0]const u16 {
-    buf.writeItem(0) catch unreachable;
-    const s = buf.readableSlice(0);
-    return s[0 .. s.len - 1 :0];
-}
-
-fn formatWstr(buf: []u8, comptime fmt: []const u8, args: anytype) ![:0]const u16 {
-    const str = try std.fmt.bufPrint(buf, fmt, args);
-
-    var alloc = std.heap.FixedBufferAllocator.init(buf[str.len..]);
-    return std.unicode.utf8ToUtf16LeWithNull(alloc.allocator(), str);
 }
 
 //=== Actual application ===//
@@ -253,6 +240,8 @@ const app = struct {
             assert(scope.id == self.scratch_stack);
             assert(scope.id > 0);
             self.scratch_stack = scope.id - 1;
+            // TODO (Matteo): Do not always decommit, I suspect that many syscalls can be
+            // a problem for performance
             self.shrinkTo(scope.pos);
         }
 
@@ -512,36 +501,9 @@ const app = struct {
         if (builtin.mode == .Debug) debugInfo(pb);
     }
 
-    fn load(win: win32.HWND, file_name_utf8: []const u8) !void {
-        // TODO (Matteo): Avoid some UTF8 <=> UTF16 conversion?
-
-        const scratch = memory.beginScratch();
-        defer memory.endScratch(scratch);
-        var buf = TempBuf(u16).init(try memory.alloc(u16, max_path_size));
-
-        // Prepend string for composing the title
-        try buf.write(app_name);
-        try buf.write(L(" - "));
-        const offset = buf.readableLength();
-
-        // Append filename
-        const len = try std.unicode.utf8ToUtf16Le(buf.writableSlice(0), file_name_utf8);
-        buf.update(len);
-
-        const title = getWStr(&buf);
-        const file_name = title[offset.. :0];
-
-        assert(len == file_name.len);
-
-        var new_image: *gdip.Image = undefined;
-        if (gdip.createImageFromFile(file_name, &new_image) != 0) {
-            try invalidFile(win, file_name);
-        } else {
-            try disposeImage();
-            image = new_image;
-
-            if (win32.InvalidateRect(win, null, win32.TRUE) == 0) return error.Unexpected;
-            if (win32.setWindowText(win, title) == 0) return error.Unexpected;
+    fn disposeImage() gdip.Error!void {
+        if (image) |old_img| {
+            try gdip.checkStatus(gdip.disposeImage(old_img));
         }
     }
 
@@ -567,49 +529,39 @@ const app = struct {
         }
     }
 
-    fn disposeImage() gdip.Error!void {
-        if (image) |old_img| {
-            try gdip.checkStatus(gdip.disposeImage(old_img));
-        }
-    }
-
-    fn isSupported(filename: []const u8) bool {
-        const dot = std.mem.lastIndexOfScalar(u8, filename, '.') orelse return false;
-        const ext = filename[dot..filename.len];
-
-        if (ext.len == 0) return false;
-
-        assert(ext[ext.len - 1] != 0);
-
-        for (extensions) |token| {
-            if (std.ascii.eqlIgnoreCase(token, ext)) return true;
-        }
-
-        return false;
-    }
-
-    fn invalidFile(win: win32.HWND, file_name: [:0]const u16) gdip.Error!void {
-        const header = L("Invalid image file: ");
-        const len = header.len + file_name.len;
-
+    fn load(win: win32.HWND, file_name: []const u8) !void {
         const scratch = memory.beginScratch();
         defer memory.endScratch(scratch);
-        var buf = try memory.alloc(u16, len + 1);
 
-        std.mem.copy(u16, buf, header);
-        std.mem.copy(u16, buf[header.len..], file_name);
-        buf[len] = 0;
+        const file = try std.fs.openFileAbsolute(file_name, .{});
+        defer file.close();
 
-        _ = try win32.messageBox(win, buf[0..len :0], app_name, 0);
-    }
+        const info = try file.metadata();
+        const block = try memory.alloc(u8, info.size());
+        _ = try file.readAll(block);
 
-    fn messageBox(win: ?win32.HWND, comptime fmt: []const u8, args: anytype) !void {
-        const scratch = memory.beginScratch();
-        defer memory.endScratch(scratch);
-        var buf = try memory.alloc(u8, 4096);
+        var stream = try win32.createMemStream(block);
+        var new_image: *gdip.Image = undefined;
 
-        const out = try formatWstr(buf, fmt, args);
-        _ = try win32.messageBox(win, out, app_name, 0);
+        if (gdip.createImageFromStream(stream, &new_image) != 0) {
+            try messageBox(win, "Invalid image file: {s}", .{file_name});
+        } else {
+            try disposeImage();
+            image = new_image;
+
+            // Build title by composing app name and file path
+            var buf = RingBuffer(u16).init(try memory.alloc(u16, max_path_size));
+            try buf.write(app_name);
+            try buf.write(L(" - "));
+            const len = try std.unicode.utf8ToUtf16Le(buf.writableSlice(0), file_name);
+            buf.update(len);
+            try buf.writeItem(0);
+
+            const title = buf.readableSlice(0)[0 .. buf.readableLength() - 1 :0];
+
+            if (win32.InvalidateRect(win, null, win32.TRUE) == 0) return error.Unexpected;
+            if (win32.setWindowText(win, title) == 0) return error.Unexpected;
+        }
     }
 
     pub fn updateFiles(path: []const u8) !void {
@@ -654,6 +606,21 @@ const app = struct {
         }
     }
 
+    fn isSupported(filename: []const u8) bool {
+        const dot = std.mem.lastIndexOfScalar(u8, filename, '.') orelse return false;
+        const ext = filename[dot..filename.len];
+
+        if (ext.len == 0) return false;
+
+        assert(ext[ext.len - 1] != 0);
+
+        for (extensions) |token| {
+            if (std.ascii.eqlIgnoreCase(token, ext)) return true;
+        }
+
+        return false;
+    }
+
     pub fn browsePrev() bool {
         if (files.len > 1) {
             file_index = if (file_index == 0) files.len - 1 else file_index - 1;
@@ -668,6 +635,15 @@ const app = struct {
             return true;
         }
         return false;
+    }
+
+    fn messageBox(win: ?win32.HWND, comptime fmt: []const u8, args: anytype) !void {
+        const scratch = memory.beginScratch();
+        defer memory.endScratch(scratch);
+        var buf = try memory.alloc(u8, 4096);
+
+        const out = try formatWstr(buf, fmt, args);
+        _ = try win32.messageBox(win, out, app_name, 0);
     }
 
     fn debugInfo(pb: win32.PaintBuffer) void {
@@ -695,6 +671,13 @@ const app = struct {
         cur_y += size.cy;
 
         return cur_y;
+    }
+
+    fn formatWstr(buf: []u8, comptime fmt: []const u8, args: anytype) ![:0]const u16 {
+        const str = try std.fmt.bufPrint(buf, fmt, args);
+
+        var alloc = std.heap.FixedBufferAllocator.init(buf[str.len..]);
+        return std.unicode.utf8ToUtf16LeWithNull(alloc.allocator(), str);
     }
 };
 
@@ -765,11 +748,6 @@ const gdip = struct {
         output: *GdiplusStartupOutput,
     ) callconv(WINGDIPAPI) Status;
 
-    const GdipCreateBitmapFromFile = *const fn (
-        filename: win32.LPCWSTR,
-        image: **Image,
-    ) callconv(WINGDIPAPI) Status;
-
     const GdipCreateBitmapFromStream = *const fn (
         stream: *win32.IStream,
         image: **Image,
@@ -807,7 +785,6 @@ const gdip = struct {
 
     var dll: win32.HMODULE = undefined;
     var token: win32.ULONG_PTR = 0;
-    var createImageFromFile: GdipCreateBitmapFromFile = undefined;
     var createImageFromStream: GdipCreateBitmapFromStream = undefined;
     var disposeImage: GdipDisposeImage = undefined;
     var getImageDimension: GdipGetImageDimension = undefined;
@@ -819,7 +796,6 @@ const gdip = struct {
 
     pub fn init() Error!void {
         dll = win32.kernel32.LoadLibraryW(L("Gdiplus")) orelse return error.Unexpected;
-        createImageFromFile = try win32.loadProc(GdipCreateBitmapFromFile, "GdipCreateBitmapFromFile", dll);
         createImageFromStream = try win32.loadProc(GdipCreateBitmapFromStream, "GdipCreateBitmapFromStream", dll);
         disposeImage = try win32.loadProc(GdipDisposeImage, "GdipDisposeImage", dll);
         getImageDimension = try win32.loadProc(GdipGetImageDimension, "GdipGetImageDimension", dll);
