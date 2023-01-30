@@ -15,6 +15,7 @@ bytes: [*]u8,
 
 volatile_start: usize = 0,
 volatile_end: usize = 0,
+volatile_commit: usize = 0,
 
 string_start: usize = capacity,
 
@@ -53,7 +54,20 @@ pub fn persistentAlloc(self: *Memory, comptime T: type, count: usize) ![]T {
 pub fn clear(self: *Memory) void {
     assert(self.scratch_stack == 0);
 
-    self.shrinkTo(self.volatile_start);
+    // Decommit excess to catch rogue memory usage
+    const min_commit = std.mem.alignForward(self.volatile_start, std.mem.page_size);
+
+    if (min_commit < self.volatile_commit) {
+        win32.VirtualFree(
+            @ptrCast(win32.LPVOID, self.bytes + min_commit),
+            self.volatile_commit - min_commit,
+            win32.MEM_DECOMMIT,
+        );
+
+        self.volatile_commit = min_commit;
+    }
+
+    self.volatile_end = self.volatile_start;
 
     if (self.string_start < capacity) {
         const string_commit = std.mem.alignBackward(self.string_start, std.mem.page_size);
@@ -83,11 +97,7 @@ pub fn allocAlign(self: *Memory, comptime T: type, comptime alignment: u29, coun
     const avail = self.string_start - mem_start;
     if (avail < size) return error.OutOfMemory;
 
-    try self.commit(
-        std.mem.alignForward(self.volatile_end, std.mem.page_size),
-        std.mem.alignForward(mem_end, std.mem.page_size),
-    );
-
+    try self.commitVolatile(mem_end);
     self.volatile_end = mem_end;
 
     assert(@divExact(mem_end - mem_start, @sizeOf(T)) == count);
@@ -108,12 +118,7 @@ pub fn resize(self: *Memory, comptime T: type, mem: *[]T, count: usize) !void {
         if (avail < size) return error.OutOfMemory;
 
         const next_pos = self.volatile_end + size;
-
-        try self.commit(
-            std.mem.alignForward(self.volatile_end, std.mem.page_size),
-            std.mem.alignForward(next_pos, std.mem.page_size),
-        );
-
+        try self.commitVolatile(next_pos);
         self.volatile_end = next_pos;
     }
 
@@ -138,13 +143,28 @@ pub fn stringAlloc(self: *Memory, size: usize) ![]u8 {
     const end = self.string_start;
     const start = end - size;
 
-    try self.commit(
-        std.mem.alignBackward(start, std.mem.page_size),
-        std.mem.alignBackward(end, std.mem.page_size),
-    );
+    const commit_start = std.mem.alignBackward(start, std.mem.page_size);
+    const commit_end = std.mem.alignBackward(end, std.mem.page_size);
+
+    if (commit_end > commit_start) {
+        _ = try win32.VirtualAlloc(
+            @ptrCast(win32.LPVOID, self.bytes + commit_start),
+            commit_end - commit_start,
+            win32.MEM_COMMIT,
+            win32.PAGE_READWRITE,
+        );
+    }
 
     self.string_start = start;
     return self.bytes[start..end];
+}
+
+pub inline fn stringUsedSize(self: *const Memory) usize {
+    return capacity - self.string_start;
+}
+
+pub inline fn stringCommitSize(self: *const Memory) usize {
+    return capacity - std.mem.alignBackward(self.string_start, std.mem.page_size);
 }
 
 //=== Scratch ===//
@@ -163,59 +183,23 @@ pub fn endScratch(self: *Memory, scope: ScratchScope) void {
     assert(scope.id == self.scratch_stack);
     assert(scope.id > 0);
     self.scratch_stack = scope.id - 1;
-    // TODO (Matteo): Do not always decommit, I suspect that many syscalls can be
-    // a problem for performance
-    self.shrinkTo(scope.pos);
-}
-
-//=== Usage info ===//
-
-pub inline fn persistentSize(self: *const Memory) usize {
-    return self.volatile_start;
-}
-
-pub inline fn volatileSize(self: *const Memory) usize {
-    return self.volatile_end - self.volatile_start;
-}
-
-pub inline fn stringSize(self: *const Memory) usize {
-    return capacity - self.string_start;
-}
-
-pub inline fn committedSize(self: *const Memory) usize {
-    const volatile_commit = std.mem.alignForward(self.volatile_end, std.mem.page_size);
-    const string_commit = std.mem.alignBackward(self.string_start, std.mem.page_size);
-
-    return volatile_commit + capacity - string_commit;
+    // TODO (Matteo): Decommit in debug builds?
+    self.volatile_end = scope.pos;
 }
 
 //=== Internals ===//
 
-fn shrinkTo(self: *Memory, pos: usize) void {
-    assert(pos <= self.volatile_end);
+fn commitVolatile(self: *Memory, target: usize) !void {
+    const min_commit = std.mem.alignForward(target, std.mem.page_size);
 
-    // Decommit excess to catch rogue memory usage
-    const curr_commit = std.mem.alignForward(self.volatile_end, std.mem.page_size);
-    const next_commit = std.mem.alignForward(pos, std.mem.page_size);
-
-    if (next_commit < curr_commit) {
-        win32.VirtualFree(
-            @ptrCast(win32.LPVOID, self.bytes + next_commit),
-            curr_commit - next_commit,
-            win32.MEM_DECOMMIT,
-        );
-    }
-
-    self.volatile_end = pos;
-}
-
-fn commit(self: *Memory, low: usize, high: usize) !void {
-    if (high > low) {
+    if (min_commit > self.volatile_commit) {
         _ = try win32.VirtualAlloc(
-            @ptrCast(win32.LPVOID, self.bytes + low),
-            high - low,
+            @ptrCast(win32.LPVOID, self.bytes + self.volatile_commit),
+            min_commit - self.volatile_commit,
             win32.MEM_COMMIT,
             win32.PAGE_READWRITE,
         );
+
+        self.volatile_commit = min_commit;
     }
 }

@@ -336,27 +336,25 @@ const app = struct {
     }
 
     fn load(win: win32.HWND, file_name: []const u8) !void {
-        const scratch = memory.beginScratch();
-        defer memory.endScratch(scratch);
+        const new_image = loadImageFile(file_name) catch |err| switch (err) {
+            error.InvalidImageFile => {
+                try messageBox(win, "Invalid image file: {s}", .{file_name});
+                return;
+            },
+            else => return err,
+        };
 
-        const file = try std.fs.openFileAbsolute(file_name, .{});
-        defer file.close();
+        try disposeImage();
+        image = new_image;
 
-        const info = try file.metadata();
-        const block = try memory.alloc(u8, info.size());
-        _ = try file.readAll(block);
+        // Build title by composing app name and file path
+        {
+            const scratch = memory.beginScratch();
+            defer memory.endScratch(scratch);
 
-        var stream = try win32.createMemStream(block);
-        var new_image: *gdip.Image = undefined;
+            const buf_size = app_name.len + file_name.len + 16;
 
-        if (gdip.createImageFromStream(stream, &new_image) != 0) {
-            try messageBox(win, "Invalid image file: {s}", .{file_name});
-        } else {
-            try disposeImage();
-            image = new_image;
-
-            // Build title by composing app name and file path
-            var buf = RingBuffer(u16).init(try memory.alloc(u16, max_path_size));
+            var buf = RingBuffer(u16).init(try memory.alloc(u16, buf_size));
             try buf.write(app_name);
             try buf.write(L(" - "));
             const len = try std.unicode.utf8ToUtf16Le(buf.writableSlice(0), file_name);
@@ -370,7 +368,30 @@ const app = struct {
         }
     }
 
-    pub fn updateFiles(path: []const u8) !void {
+    fn loadImageFile(file_name: []const u8) !*gdip.Image {
+        var new_image: *gdip.Image = undefined;
+
+        // Open file for reading
+        const file = try std.fs.openFileAbsolute(file_name, .{});
+        defer file.close();
+        const info = try file.metadata();
+
+        // Read all file in a temporary block
+        const scratch = memory.beginScratch();
+        defer memory.endScratch(scratch);
+        const block = try memory.alloc(u8, info.size());
+        _ = try file.readAll(block);
+
+        var stream = try win32.createMemStream(block);
+
+        if (gdip.createImageFromStream(stream, &new_image) != 0) {
+            return error.InvalidImageFile;
+        }
+
+        return new_image;
+    }
+
+    fn updateFiles(path: []const u8) !void {
         // Clear current list
         files.len = 0;
         file_index = 0;
@@ -427,7 +448,7 @@ const app = struct {
         return false;
     }
 
-    pub fn browsePrev() bool {
+    fn browsePrev() bool {
         if (files.len > 1) {
             file_index = if (file_index == 0) files.len - 1 else file_index - 1;
             return true;
@@ -435,7 +456,7 @@ const app = struct {
         return false;
     }
 
-    pub fn browseNext() bool {
+    fn browseNext() bool {
         if (files.len > 1) {
             file_index = if (file_index == files.len - 1) 0 else file_index + 1;
             return true;
@@ -454,13 +475,25 @@ const app = struct {
 
     fn debugInfo(pb: win32.PaintBuffer) void {
         var y: i32 = 0;
+
+        const string_used = memory.stringUsedSize();
+        const string_commit = memory.stringCommitSize();
+        const total_commit = memory.volatile_commit + string_commit;
+
         y = debugText(pb, y, debug_buf, "Debug mode", .{});
         y = debugText(pb, y, debug_buf, "# files: {}", .{files.len});
-        y = debugText(pb, y, debug_buf, "Persistent memory: {}", .{memory.persistentSize()});
-        y = debugText(pb, y, debug_buf, "Volatile memory: {}", .{memory.volatileSize()});
-        y = debugText(pb, y, debug_buf, "String memory: {}", .{memory.stringSize()});
-        y = debugText(pb, y, debug_buf, "Total committed memory: {}", .{memory.committedSize()});
-        y = debugText(pb, y, debug_buf, "Scratch stack: {}", .{memory.scratch_stack});
+        y = debugText(pb, y, debug_buf, "Memory usage", .{});
+        y = debugText(pb, y, debug_buf, "   Total: {}", .{total_commit});
+        y = debugText(pb, y, debug_buf, "   Persistent: {}", .{memory.volatile_start});
+        y = debugText(pb, y, debug_buf, "   Volatile:", .{});
+        y = debugText(pb, y, debug_buf, "      Committed: {}", .{memory.volatile_commit - memory.volatile_start});
+        y = debugText(pb, y, debug_buf, "      Used: {}", .{memory.volatile_end - memory.volatile_start});
+        y = debugText(pb, y, debug_buf, "      Waste: {}", .{memory.volatile_commit - memory.volatile_end});
+        y = debugText(pb, y, debug_buf, "   String", .{});
+        y = debugText(pb, y, debug_buf, "      Committed: {}", .{string_commit});
+        y = debugText(pb, y, debug_buf, "      Used: {}", .{string_used});
+        y = debugText(pb, y, debug_buf, "      Waste: {}", .{string_commit - string_used});
+        y = debugText(pb, y, debug_buf, "   Scratch stack: {}", .{memory.scratch_stack});
     }
 
     fn debugText(pb: win32.PaintBuffer, y: i32, buf: []u8, comptime fmt: []const u8, args: anytype) i32 {
