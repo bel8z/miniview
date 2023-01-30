@@ -308,9 +308,7 @@ const app = struct {
     }
 
     fn disposeImage() gdip.Error!void {
-        if (image) |old_img| {
-            try gdip.checkStatus(gdip.disposeImage(old_img));
-        }
+        if (image) |old_img| try gdip.checkStatus(gdip.disposeImage(old_img));
     }
 
     fn open(win: win32.HWND) !void {
@@ -337,7 +335,7 @@ const app = struct {
 
     fn load(win: win32.HWND, file_name: []const u8) !void {
         const new_image = loadImageFile(file_name) catch |err| switch (err) {
-            error.InvalidImageFile => {
+            error.InvalidParameter => {
                 try messageBox(win, "Invalid image file: {s}", .{file_name});
                 return;
             },
@@ -348,45 +346,41 @@ const app = struct {
         image = new_image;
 
         // Build title by composing app name and file path
-        {
-            const scratch = memory.beginScratch();
-            defer memory.endScratch(scratch);
+        const scratch = memory.beginScratch();
+        defer memory.endScratch(scratch);
 
-            const buf_size = app_name.len + file_name.len + 16;
+        const buf_size = app_name.len + file_name.len + 16;
 
-            var buf = RingBuffer(u16).init(try memory.alloc(u16, buf_size));
-            try buf.write(app_name);
-            try buf.write(L(" - "));
-            const len = try std.unicode.utf8ToUtf16Le(buf.writableSlice(0), file_name);
-            buf.update(len);
-            try buf.writeItem(0);
+        var buf = RingBuffer(u16).init(try memory.alloc(u16, buf_size));
+        try buf.write(app_name);
+        try buf.write(L(" - "));
+        const len = try std.unicode.utf8ToUtf16Le(buf.writableSlice(0), file_name);
+        buf.update(len);
+        try buf.writeItem(0);
 
-            const title = buf.readableSlice(0)[0 .. buf.readableLength() - 1 :0];
+        const title = buf.readableSlice(0)[0 .. buf.readableLength() - 1 :0];
 
-            if (win32.InvalidateRect(win, null, win32.TRUE) == 0) return error.Unexpected;
-            if (win32.setWindowText(win, title) == 0) return error.Unexpected;
-        }
+        if (win32.InvalidateRect(win, null, win32.TRUE) == 0) return error.Unexpected;
+        if (win32.setWindowText(win, title) == 0) return error.Unexpected;
     }
 
     fn loadImageFile(file_name: []const u8) !*gdip.Image {
-        var new_image: *gdip.Image = undefined;
-
-        // Open file for reading
         const file = try std.fs.openFileAbsolute(file_name, .{});
         defer file.close();
-        const info = try file.metadata();
 
         // Read all file in a temporary block
         const scratch = memory.beginScratch();
         defer memory.endScratch(scratch);
+        const info = try file.metadata();
         const block = try memory.alloc(u8, info.size());
         _ = try file.readAll(block);
 
-        var stream = try win32.createMemStream(block);
-
-        if (gdip.createImageFromStream(stream, &new_image) != 0) {
-            return error.InvalidImageFile;
-        }
+        var new_image: *gdip.Image = undefined;
+        const status = gdip.createImageFromStream(
+            try win32.createMemStream(block),
+            &new_image,
+        );
+        try gdip.checkStatus(status);
 
         return new_image;
     }
