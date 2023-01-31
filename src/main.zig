@@ -43,7 +43,7 @@ pub fn panic(err: []const u8, maybe_trace: ?*std.builtin.StackTrace, ret_addr: ?
         const win_err = win32.GetLastError();
         if (win_err != 0) {
             var buf_utf8: [win32.ERROR_SIZE]u8 = undefined;
-            writer.print("\n\nGetLastError() =  {x}: {s}", .{
+            writer.print("\n\nGetLastError() =  0x{x}: {s}", .{
                 win_err,
                 win32.formatError(win_err, &buf_utf8) catch unreachable,
             }) catch unreachable;
@@ -66,10 +66,7 @@ pub fn panic(err: []const u8, maybe_trace: ?*std.builtin.StackTrace, ret_addr: ?
     // TODO (Matteo): Use ret_addr for better diagnostics
     _ = ret_addr;
 
-    // Spinning required because the function is 'noreturn'
-    while (builtin.mode == .Debug) @breakpoint();
-
-    // Abort in non-debug builds.
+    // NOTE (Matteo): This breaks in debug builds on Windows
     std.os.abort();
 }
 
