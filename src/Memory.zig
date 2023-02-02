@@ -8,29 +8,29 @@ const assert = std.debug.assert;
 
 //== Data ==//
 
-// TODO (Matteo): 1GB should be enough, or not?
-const capacity: usize = 1024 * 1024 * 1024;
-
-bytes: [*]u8,
+bytes: []u8,
 
 volatile_start: usize = 0,
 volatile_end: usize = 0,
 volatile_commit: usize = 0,
 
-string_start: usize = capacity,
+string_start: usize,
 
 scratch_stack: usize = 0,
 
-pub fn init() !Memory {
+pub fn init(capacity: usize) !Memory {
     // Allocate block
-    var self = Memory{ .bytes = @ptrCast([*]u8, try win32.VirtualAlloc(
-        null,
-        capacity,
-        win32.MEM_RESERVE,
-        win32.PAGE_NOACCESS,
-    )) };
+    var self = Memory{
+        .bytes = @ptrCast([*]u8, try win32.VirtualAlloc(
+            null,
+            capacity,
+            win32.MEM_RESERVE,
+            win32.PAGE_NOACCESS,
+        ))[0..capacity],
+        .string_start = capacity,
+    };
 
-    assert(std.mem.isAligned(@ptrToInt(self.bytes), std.mem.page_size));
+    assert(std.mem.isAligned(@ptrToInt(self.bytes.ptr), std.mem.page_size));
     assert(std.mem.alignForward(self.volatile_end, std.mem.page_size) == 0);
 
     return self;
@@ -43,10 +43,15 @@ pub fn init() !Memory {
 pub fn persistentAlloc(self: *Memory, comptime T: type, count: usize) ![]T {
     if (self.volatile_end > self.volatile_start) return error.OutOfMemory;
 
-    const mem = try self.alloc(T, count);
+    const mem = try self.allocAlign(T, @alignOf(T), count);
     self.volatile_start = self.volatile_end;
 
     return mem;
+}
+
+pub inline fn persistentAllocOne(self: *Memory, comptime T: type) !*T {
+    const slice = try self.persistentAlloc(T, 1);
+    return &slice[0];
 }
 
 //=== Volatile ===//
@@ -59,7 +64,7 @@ pub fn clear(self: *Memory) void {
 
     if (min_commit < self.volatile_commit) {
         win32.VirtualFree(
-            @ptrCast(win32.LPVOID, self.bytes + min_commit),
+            @ptrCast(win32.LPVOID, self.bytes.ptr + min_commit),
             self.volatile_commit - min_commit,
             win32.MEM_DECOMMIT,
         );
@@ -69,22 +74,27 @@ pub fn clear(self: *Memory) void {
 
     self.volatile_end = self.volatile_start;
 
-    if (self.string_start < capacity) {
+    if (self.string_start < self.bytes.len) {
         const string_commit = std.mem.alignBackward(self.string_start, std.mem.page_size);
 
         win32.VirtualFree(
-            @ptrCast(win32.LPVOID, self.bytes + string_commit),
-            capacity - string_commit,
+            @ptrCast(win32.LPVOID, self.bytes.ptr + string_commit),
+            self.bytes.len - string_commit,
             win32.MEM_DECOMMIT,
         );
 
-        self.string_start = capacity;
+        self.string_start = self.bytes.len;
     }
 }
 
 /// Volatile allocation
 pub fn alloc(self: *Memory, comptime T: type, count: usize) ![]align(@alignOf(T)) T {
     return self.allocAlign(T, @alignOf(T), count);
+}
+
+pub inline fn allocOne(self: *Memory, comptime T: type) !*T {
+    const slice = try self.allocAlign(T, @alignOf(T), 1);
+    return &slice[0];
 }
 
 /// Volatile aligned allocation
@@ -102,7 +112,7 @@ pub fn allocAlign(self: *Memory, comptime T: type, comptime alignment: u29, coun
 
     assert(@divExact(mem_end - mem_start, @sizeOf(T)) == count);
 
-    const ptr = @ptrCast([*]T, @alignCast(alignment, self.bytes + mem_start));
+    const ptr = @ptrCast([*]T, @alignCast(alignment, self.bytes.ptr + mem_start));
     return ptr[0..count];
 }
 
@@ -127,7 +137,7 @@ pub fn resize(self: *Memory, comptime T: type, mem: *[]T, count: usize) !void {
 
 pub fn isLastAlloc(self: *Memory, comptime T: type, mem: []T) bool {
     const size = mem.len * @sizeOf(T);
-    return @ptrToInt(self.bytes + self.volatile_end) - size == @ptrToInt(mem.ptr);
+    return @ptrToInt(self.bytes.ptr + self.volatile_end) - size == @ptrToInt(mem.ptr);
 }
 
 //=== Strings ===//
@@ -148,7 +158,7 @@ pub fn stringAlloc(self: *Memory, size: usize) ![]u8 {
 
     if (commit_end > commit_start) {
         _ = try win32.VirtualAlloc(
-            @ptrCast(win32.LPVOID, self.bytes + commit_start),
+            @ptrCast(win32.LPVOID, self.bytes.ptr + commit_start),
             commit_end - commit_start,
             win32.MEM_COMMIT,
             win32.PAGE_READWRITE,
@@ -160,11 +170,11 @@ pub fn stringAlloc(self: *Memory, size: usize) ![]u8 {
 }
 
 pub inline fn stringUsedSize(self: *const Memory) usize {
-    return capacity - self.string_start;
+    return self.bytes.len - self.string_start;
 }
 
 pub inline fn stringCommitSize(self: *const Memory) usize {
-    return capacity - std.mem.alignBackward(self.string_start, std.mem.page_size);
+    return self.bytes.len - std.mem.alignBackward(self.string_start, std.mem.page_size);
 }
 
 //=== Scratch ===//
@@ -194,7 +204,7 @@ fn commitVolatile(self: *Memory, target: usize) !void {
 
     if (min_commit > self.volatile_commit) {
         _ = try win32.VirtualAlloc(
-            @ptrCast(win32.LPVOID, self.bytes + self.volatile_commit),
+            @ptrCast(win32.LPVOID, self.bytes.ptr + self.volatile_commit),
             min_commit - self.volatile_commit,
             win32.MEM_COMMIT,
             win32.PAGE_READWRITE,

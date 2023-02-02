@@ -97,8 +97,52 @@ const app = struct {
         break :init temp;
     };
 
+    const Image = union(enum) {
+        None,
+        Loaded: *gdip.Image,
+        Failed: gdip.Status,
+    };
+
+    const CacheHandle = packed struct { idx: u32 = 0, gen: u32 = 0 };
+
+    const ImageCache = struct {
+        const Node = struct { gen: u32 = 0, val: Image = .None };
+        const Self = @This();
+        const size: u32 = 16;
+
+        nodes: [size]Node = [_]Node{.{}} ** size,
+        count: u32 = 0,
+
+        pub fn new(self: *Self) CacheHandle {
+            var node = &self.nodes[self.count];
+
+            const handle = CacheHandle{
+                .idx = self.count,
+                .gen = if (node.gen == std.math.maxInt(u32)) 1 else node.gen + 1,
+            };
+
+            self.count = if (self.count == size) 0 else self.count + 1;
+
+            switch (node.val) {
+                .Loaded => |ptr| gdip.checkStatus(gdip.disposeImage(ptr)) catch unreachable,
+                else => {},
+            }
+            node.gen = handle.gen;
+            node.val = .None;
+
+            return handle;
+        }
+
+        pub fn get(self: *Self, handle: CacheHandle) ?*Image {
+            if (handle.gen == 0) return null;
+            const node = &self.nodes[handle.idx];
+            return if (node.gen == handle.gen) &node.val else null;
+        }
+    };
+
     const FileInfo = struct {
         name: []u8,
+        handle: CacheHandle = .{},
     };
 
     const Command = enum(u32) {
@@ -110,17 +154,22 @@ const app = struct {
     var files: []FileInfo = &[_]FileInfo{};
     var file_index: usize = 0;
 
+    var images: *ImageCache = undefined;
     var image: ?*gdip.Image = null;
 
     var debug_buf: []u8 = &[_]u8{};
 
     pub fn main() anyerror!void {
         // Init memory block
-        memory = try Memory.init();
+        // TODO (Matteo): 1GB should be enough, or not?
+        memory = try Memory.init(1024 * 1024 * 1024);
 
         if (builtin.mode == .Debug) {
             debug_buf = try memory.persistentAlloc(u8, 4096);
         }
+
+        images = try memory.persistentAllocOne(ImageCache);
+        images.* = .{};
 
         // Register window class
         const hinst = win32.getCurrentInstance();
@@ -251,6 +300,12 @@ const app = struct {
                 if ((wparam == 0x25 and browsePrev()) or (wparam == 0x27 and browseNext())) {
                     assert(files.len > 1);
                     const file = &files[file_index];
+
+                    while (true) {
+                        if (images.get(file.handle)) |_| break;
+                        file.handle = images.new();
+                    }
+
                     try load(win, file.name);
                 }
             },
@@ -416,7 +471,7 @@ const app = struct {
 
                 // Copy full path
                 var file = &files[index];
-                file.name = try memory.stringAlloc(dirname.len + entry.name.len);
+                file.* = .{ .name = try memory.stringAlloc(dirname.len + entry.name.len) };
 
                 std.mem.copy(u8, file.name[0..dirname.len], dirname);
                 std.mem.copy(u8, file.name[dirname.len..], entry.name);
