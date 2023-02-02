@@ -4,7 +4,16 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "Build",
+            "label": "Run",
+            "type": "shell",
+            "command": "zig build run --prefix ./build/ --prefix-lib-dir . --prefix-exe-dir . --cache-dir ./build/cache",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+        },
+        {
+            "label": "Build (Debug)",
             "type": "shell",
             "command": "zig build --prefix ./build/ --prefix-lib-dir . --prefix-exe-dir . --cache-dir ./build/cache",
             "group": {
@@ -12,12 +21,11 @@
             },
         },
         {
-            "label": "Build & Run",
+            "label": "Build (Release)",
             "type": "shell",
-            "command": "zig build run --prefix ./build/ --prefix-lib-dir . --prefix-exe-dir . --cache-dir ./build/cache",
+            "command": "zig build -Drelease-safe --prefix ./build/ --prefix-lib-dir . --prefix-exe-dir . --cache-dir ./build/cache",
             "group": {
                 "kind": "build",
-                "isDefault": true
             },
         },
     ]

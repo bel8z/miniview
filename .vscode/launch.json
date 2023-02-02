@@ -10,7 +10,7 @@
             "name": "Launch program",
             "program": "${workspaceRoot}/build/miniview.exe",
             "cwd": "${workspaceRoot}/build",
-            "preLaunchTask": "Build",
+            "preLaunchTask": "Build (Debug)",
         }
     ]
 }
