@@ -100,7 +100,6 @@ const app = struct {
     const Image = union(enum) {
         None,
         Loaded: *gdip.Image,
-        Failed: gdip.Status,
     };
 
     const CacheHandle = packed struct { idx: u32 = 0, gen: u32 = 0 };
@@ -110,18 +109,22 @@ const app = struct {
         const Self = @This();
         const size: u32 = 16;
 
+        comptime {
+            assert(std.math.isPowerOfTwo(size));
+        }
+
         nodes: [size]Node = [_]Node{.{}} ** size,
         count: u32 = 0,
 
         pub fn new(self: *Self) CacheHandle {
-            var node = &self.nodes[self.count];
+            const idx = @atomicRmw(u32, &self.count, .Add, 1, .SeqCst) & (size - 1);
+
+            var node = &self.nodes[idx];
 
             const handle = CacheHandle{
-                .idx = self.count,
+                .idx = idx,
                 .gen = if (node.gen == std.math.maxInt(u32)) 1 else node.gen + 1,
             };
-
-            self.count = if (self.count == size) 0 else self.count + 1;
 
             switch (node.val) {
                 .Loaded => |ptr| gdip.checkStatus(gdip.disposeImage(ptr)) catch unreachable,
@@ -137,6 +140,18 @@ const app = struct {
             if (handle.gen == 0) return null;
             const node = &self.nodes[handle.idx];
             return if (node.gen == handle.gen) &node.val else null;
+        }
+
+        pub fn clear(self: *Self) void {
+            for (self.nodes) |*node| {
+                switch (node.val) {
+                    .Loaded => |ptr| gdip.checkStatus(gdip.disposeImage(ptr)) catch unreachable,
+                    else => {},
+                }
+                node.val = .None;
+                node.gen = 0;
+            }
+            self.count = 0;
         }
     };
 
@@ -155,7 +170,7 @@ const app = struct {
     var file_index: usize = 0;
 
     var images: *ImageCache = undefined;
-    var image: ?*gdip.Image = null;
+    var curr_image: ?*gdip.Image = null;
 
     var debug_buf: []u8 = &[_]u8{};
 
@@ -234,14 +249,15 @@ const app = struct {
                 var path8: [max_path_size]u8 = undefined;
                 const path16 = args[1][0..std.mem.len(args[1])];
                 const len = try std.unicode.utf16leToUtf8(&path8, path16);
+                const file_name = path8[0..len];
 
-                try load(win, path8[0..len]);
-                try updateFiles(path8[0..len]);
+                try updateFiles(file_name);
+                try updateImage(win);
             }
         }
 
         // Main loop
-        defer disposeImage() catch unreachable;
+        defer images.clear();
 
         var msg: win32.MSG = undefined;
 
@@ -299,14 +315,7 @@ const app = struct {
             win32.WM_KEYDOWN => {
                 if ((wparam == 0x25 and browsePrev()) or (wparam == 0x27 and browseNext())) {
                     assert(files.len > 1);
-                    const file = &files[file_index];
-
-                    while (true) {
-                        if (images.get(file.handle)) |_| break;
-                        file.handle = images.new();
-                    }
-
-                    try load(win, file.name);
+                    try updateImage(win);
                 }
             },
             else => return false,
@@ -322,7 +331,7 @@ const app = struct {
 
         try gdip.checkStatus(gdip.graphicsClear(gfx, 0xFFF0F0F0));
 
-        if (image) |bmp| {
+        if (curr_image) |bmp| {
             // Compute dimensions
             const bounds = pb.ps.rcPaint;
             const bounds_w = @intToFloat(f32, bounds.right - bounds.left);
@@ -359,8 +368,23 @@ const app = struct {
         if (builtin.mode == .Debug) debugInfo(pb);
     }
 
-    fn disposeImage() gdip.Error!void {
-        if (image) |old_img| try gdip.checkStatus(gdip.disposeImage(old_img));
+    /// Build title by composing app name and file path
+    fn setTitle(win: win32.HWND, file_name: []const u8) !void {
+        const scratch = memory.beginScratch();
+        defer memory.endScratch(scratch);
+
+        const buf_size = app_name.len + file_name.len + 16;
+
+        var buf = RingBuffer(u16).init(try memory.alloc(u16, buf_size));
+        try buf.write(app_name);
+        try buf.write(L(" - "));
+        const len = try std.unicode.utf8ToUtf16Le(buf.writableSlice(0), file_name);
+        buf.update(len);
+        try buf.writeItem(0);
+
+        const title = buf.readableSlice(0)[0 .. buf.readableLength() - 1 :0];
+
+        if (win32.setWindowText(win, title) == 0) return error.Unexpected;
     }
 
     fn open(win: win32.HWND) !void {
@@ -376,44 +400,49 @@ const app = struct {
         };
 
         if (try win32.getOpenFileName(&ofn)) {
+            // Wipe cache
+            images.clear();
+
             const len = try std.unicode.utf16leToUtf8(&buf8, buf16[0..std.mem.len(ptr)]);
-            const path = buf8[0..len];
+            const file_name = buf8[0..len];
 
-            try load(win, path);
-
-            try updateFiles(path);
+            try updateFiles(file_name);
+            try updateImage(win);
         }
     }
 
-    fn load(win: win32.HWND, file_name: []const u8) !void {
-        const new_image = loadImageFile(file_name) catch |err| switch (err) {
-            error.InvalidParameter => {
-                try messageBox(win, "Invalid image file: {s}", .{file_name});
-                return;
-            },
-            else => return err,
-        };
+    fn updateImage(win: win32.HWND) !void {
+        if (files.len == 0) return;
 
-        try disposeImage();
-        image = new_image;
+        assert(file_index >= 0);
 
-        // Build title by composing app name and file path
-        const scratch = memory.beginScratch();
-        defer memory.endScratch(scratch);
+        const file = &files[file_index];
 
-        const buf_size = app_name.len + file_name.len + 16;
+        while (true) {
+            if (images.get(file.handle)) |cached| {
+                switch (cached.*) {
+                    .None => {
+                        const image = loadImageFile(file.name) catch |err| switch (err) {
+                            error.InvalidParameter => {
+                                try messageBox(win, "Invalid image file: {s}", .{file.name});
+                                return;
+                            },
+                            else => return err,
+                        };
+                        cached.* = Image{ .Loaded = image };
+                        curr_image = image;
+                    },
+                    .Loaded => |image| curr_image = image,
+                }
 
-        var buf = RingBuffer(u16).init(try memory.alloc(u16, buf_size));
-        try buf.write(app_name);
-        try buf.write(L(" - "));
-        const len = try std.unicode.utf8ToUtf16Le(buf.writableSlice(0), file_name);
-        buf.update(len);
-        try buf.writeItem(0);
+                break;
+            }
 
-        const title = buf.readableSlice(0)[0 .. buf.readableLength() - 1 :0];
+            file.handle = images.new();
+        }
 
         if (win32.InvalidateRect(win, null, win32.TRUE) == 0) return error.Unexpected;
-        if (win32.setWindowText(win, title) == 0) return error.Unexpected;
+        try setTitle(win, file.name);
     }
 
     fn loadImageFile(file_name: []const u8) !*gdip.Image {
