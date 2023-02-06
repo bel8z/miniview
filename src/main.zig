@@ -47,27 +47,44 @@ fn RingBuffer(comptime T: type) type {
 
 const ImageCache = struct {
     pub const Image = union(enum) { None, Loaded: *gdip.Image };
-    pub const Handle = packed struct { idx: u32 = 0, gen: u32 = 0 };
+    pub const Handle = packed struct {
+        idx: u32 = 0,
+        gen: Int = 0,
 
-    const Node = struct { gen: u32 = 0, val: Image = .None };
+        pub inline fn toInt(handle: Handle) usize {
+            return @bitCast(usize, handle);
+        }
+
+        pub inline fn fromInt(int: usize) Handle {
+            return @bitCast(Handle, int);
+        }
+    };
+
+    comptime {
+        assert(@bitSizeOf(Handle) == @bitSizeOf(usize));
+    }
+
+    const Int = std.meta.Int(.unsigned, @divExact(@bitSizeOf(usize), 2));
+
+    const Node = struct { gen: Int = 0, val: Image = .None };
     const Self = @This();
-    const size: u32 = 16;
+    const size: Int = 16;
 
     comptime {
         assert(std.math.isPowerOfTwo(size));
     }
 
     nodes: [size]Node = [_]Node{.{}} ** size,
-    count: u32 = 0,
+    count: Int = 0,
 
     pub fn new(self: *Self) Handle {
-        const idx = @atomicRmw(u32, &self.count, .Add, 1, .SeqCst) & (size - 1);
+        const idx = @atomicRmw(Int, &self.count, .Add, 1, .SeqCst) & (size - 1);
 
         var node = &self.nodes[idx];
 
         const handle = Handle{
             .idx = idx,
-            .gen = if (node.gen == std.math.maxInt(u32)) 1 else node.gen + 1,
+            .gen = if (node.gen == std.math.maxInt(Int)) 1 else node.gen + 1,
         };
 
         switch (node.val) {
