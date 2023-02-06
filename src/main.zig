@@ -45,14 +45,10 @@ fn RingBuffer(comptime T: type) type {
     return std.fifo.LinearFifo(T, .Slice);
 }
 
-const Image = union(enum) {
-    None,
-    Loaded: *gdip.Image,
-};
-
-const CacheHandle = packed struct { idx: u32 = 0, gen: u32 = 0 };
-
 const ImageCache = struct {
+    pub const Image = union(enum) { None, Loaded: *gdip.Image };
+    pub const Handle = packed struct { idx: u32 = 0, gen: u32 = 0 };
+
     const Node = struct { gen: u32 = 0, val: Image = .None };
     const Self = @This();
     const size: u32 = 16;
@@ -64,12 +60,12 @@ const ImageCache = struct {
     nodes: [size]Node = [_]Node{.{}} ** size,
     count: u32 = 0,
 
-    pub fn new(self: *Self) CacheHandle {
+    pub fn new(self: *Self) Handle {
         const idx = @atomicRmw(u32, &self.count, .Add, 1, .SeqCst) & (size - 1);
 
         var node = &self.nodes[idx];
 
-        const handle = CacheHandle{
+        const handle = Handle{
             .idx = idx,
             .gen = if (node.gen == std.math.maxInt(u32)) 1 else node.gen + 1,
         };
@@ -84,7 +80,7 @@ const ImageCache = struct {
         return handle;
     }
 
-    pub fn get(self: *Self, handle: CacheHandle) ?*Image {
+    pub fn get(self: *Self, handle: Handle) ?*Image {
         if (handle.gen == 0) return null;
         const node = &self.nodes[handle.idx];
         return if (node.gen == handle.gen) &node.val else null;
@@ -105,7 +101,7 @@ const ImageCache = struct {
 
 const FileInfo = struct {
     name: []u8,
-    handle: CacheHandle = .{},
+    handle: ImageCache.Handle = .{},
 };
 
 const Command = enum(u32) {
@@ -172,6 +168,8 @@ var files: []FileInfo = &[_]FileInfo{};
 var curr_file: usize = 0;
 var curr_image: ?*gdip.Image = null;
 
+var iocp: win32.HANDLE = undefined;
+
 var debug_buf: []u8 = &[_]u8{};
 
 fn innerMain() anyerror!void {
@@ -185,6 +183,9 @@ fn innerMain() anyerror!void {
 
     images = try memory.persistentAllocOne(ImageCache);
     images.* = .{};
+
+    // Create IO completion port for async file reading
+    iocp = try win32.CreateIoCompletionPort(win32.INVALID_HANDLE_VALUE, null, 0, 0);
 
     // Register window class
     const hinst = win32.getCurrentInstance();
@@ -433,7 +434,7 @@ fn updateImage(win: win32.HWND) !void {
                         },
                         else => return err,
                     };
-                    cached.* = Image{ .Loaded = image };
+                    cached.* = .{ .Loaded = image };
                     curr_image = image;
                 },
                 .Loaded => |image| curr_image = image,
@@ -450,15 +451,55 @@ fn updateImage(win: win32.HWND) !void {
 }
 
 fn loadImageFile(file_name: []const u8) !*gdip.Image {
-    const file = try std.fs.openFileAbsolute(file_name, .{});
-    defer file.close();
+    const wide_path = try win32.sliceToPrefixedFileW(file_name);
+
+    const file = win32.kernel32.CreateFileW(
+        wide_path.span(),
+        win32.GENERIC_READ,
+        win32.FILE_SHARE_READ,
+        null,
+        win32.OPEN_EXISTING,
+        win32.FILE_ATTRIBUTE_NORMAL | win32.FILE_FLAG_OVERLAPPED,
+        null,
+    );
+    if (file == win32.INVALID_HANDLE_VALUE) return error.Unexpected;
+
+    defer win32.CloseHandle(file);
 
     // Read all file in a temporary block
     const scratch = memory.beginScratch();
     defer memory.endScratch(scratch);
-    const info = try file.metadata();
-    const block = try memory.alloc(u8, info.size());
-    _ = try file.readAll(block);
+    const size = try win32.GetFileSizeEx(file);
+    const block = try memory.alloc(u8, size);
+
+    // Emulate asyncronous read
+    var ovp_in = std.mem.zeroInit(win32.OVERLAPPED, .{});
+    var ovp_out: ?*win32.OVERLAPPED = undefined;
+    var bytes: u32 = undefined;
+    var key: usize = undefined;
+    _ = try win32.CreateIoCompletionPort(file, iocp, 0, 0);
+    if (win32.kernel32.ReadFile(
+        file,
+        block.ptr,
+        @intCast(u32, size),
+        null,
+        &ovp_in,
+    ) == 0) {
+        const err = win32.GetLastError();
+        switch (err) {
+            997 => {}, // ERROR_IO_PENDING
+            else => {
+                // Restore error code and fail
+                win32.SetLastError(err);
+                return error.Unexpected;
+            },
+        }
+    }
+    switch (win32.GetQueuedCompletionStatus(iocp, &bytes, &key, &ovp_out, win32.INFINITE)) {
+        .Normal => {},
+        else => return error.Unexpected,
+    }
+    assert(bytes == size);
 
     var new_image: *gdip.Image = undefined;
     const status = gdip.createImageFromStream(
