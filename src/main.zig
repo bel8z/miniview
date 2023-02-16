@@ -48,7 +48,7 @@ fn RingBuffer(comptime T: type) type {
 const ImageCache = struct {
     pub const Image = union(enum) { None, Loaded: *gdip.Image };
     pub const Handle = packed struct {
-        idx: u32 = 0,
+        idx: Int = 0,
         gen: Int = 0,
 
         pub inline fn toInt(handle: Handle) usize {
@@ -178,10 +178,11 @@ pub fn panic(err: []const u8, maybe_trace: ?*std.builtin.StackTrace, ret_addr: ?
     std.os.abort();
 }
 
-var memory: Memory = undefined;
+var main_mem: Memory = undefined;
+var string_mem: Memory = undefined;
 
 var images: *ImageCache = undefined;
-var files: []FileInfo = &[_]FileInfo{};
+var files = std.ArrayListUnmanaged(FileInfo){};
 var curr_file: usize = 0;
 var curr_image: ?*gdip.Image = null;
 
@@ -191,14 +192,15 @@ var debug_buf: []u8 = &[_]u8{};
 
 fn innerMain() anyerror!void {
     // Init memory block
-    // TODO (Matteo): 1GB should be enough, or not?
-    memory = try Memory.init(1024 * 1024 * 1024);
+    // TODO (Matteo): 1GB should be enough, right? Mind that on x86 Windows the
+    // available address space should be 2GB, but reserving that much failed...
+    const reserved = try Memory.rawReserve(1024 * 1024 * 1024);
+    main_mem = Memory.fromReserved(reserved[0 .. reserved.len / 2]);
+    string_mem = Memory.fromReserved(reserved[reserved.len / 2 ..]);
 
-    if (builtin.mode == .Debug) {
-        debug_buf = try memory.persistentAlloc(u8, 4096);
-    }
-
-    images = try memory.persistentAllocOne(ImageCache);
+    // Allocate persistent data
+    if (builtin.mode == .Debug) debug_buf = try main_mem.alloc(u8, 4096);
+    images = try main_mem.allocOne(ImageCache);
     images.* = .{};
 
     // Create IO completion port for async file reading
@@ -331,10 +333,11 @@ fn processEvent(
             }
         },
         win32.WM_KEYDOWN => {
-            if (files.len < 2) return false;
+            const file_count = files.items.len;
+            if (file_count < 2) return false;
             switch (wparam) {
-                0x25 => curr_file = if (curr_file == 0) files.len - 1 else curr_file - 1, // Prev
-                0x27 => curr_file = if (curr_file == files.len - 1) 0 else curr_file + 1, // Next
+                0x25 => curr_file = if (curr_file == 0) file_count - 1 else curr_file - 1, // Prev
+                0x27 => curr_file = if (curr_file == file_count - 1) 0 else curr_file + 1, // Next
                 else => return false,
             }
 
@@ -392,12 +395,12 @@ fn paint(pb: win32.PaintBuffer) !void {
 
 /// Build title by composing app name and file path
 fn setTitle(win: win32.HWND, file_name: []const u8) !void {
-    const scratch = memory.beginScratch();
-    defer memory.endScratch(scratch);
+    const scratch = main_mem.beginScratch();
+    defer main_mem.endScratch(scratch);
 
     const buf_size = app_name.len + file_name.len + 16;
 
-    var buf = RingBuffer(u16).init(try memory.alloc(u16, buf_size));
+    var buf = RingBuffer(u16).init(try main_mem.alloc(u16, buf_size));
     try buf.write(app_name);
     try buf.write(L(" - "));
     const len = try std.unicode.utf8ToUtf16Le(buf.writableSlice(0), file_name);
@@ -434,11 +437,11 @@ fn open(win: win32.HWND) !void {
 }
 
 fn updateImage(win: win32.HWND) !void {
-    if (files.len == 0) return;
+    if (files.items.len == 0) return;
 
     assert(curr_file >= 0);
 
-    const file = &files[curr_file];
+    const file = &files.items[curr_file];
 
     while (true) {
         if (images.get(file.handle)) |cached| {
@@ -484,10 +487,10 @@ fn loadImageFile(file_name: []const u8) !*gdip.Image {
     defer win32.CloseHandle(file);
 
     // Read all file in a temporary block
-    const scratch = memory.beginScratch();
-    defer memory.endScratch(scratch);
-    const size = try win32.GetFileSizeEx(file);
-    const block = try memory.alloc(u8, size);
+    const scratch = main_mem.beginScratch();
+    defer main_mem.endScratch(scratch);
+    const size = @intCast(usize, try win32.GetFileSizeEx(file));
+    const block = try main_mem.alloc(u8, size);
 
     // Emulate asyncronous read
     var ovp_in = std.mem.zeroInit(win32.OVERLAPPED, .{});
@@ -530,9 +533,9 @@ fn loadImageFile(file_name: []const u8) !*gdip.Image {
 
 fn updateFiles(path: []const u8) !void {
     // Clear current list
-    files.len = 0;
+    files.clearRetainingCapacity();
     curr_file = 0;
-    memory.clear();
+    assert(main_mem.scratch_stack == 0);
 
     // Split path in file and directory names
     const sep = std.mem.lastIndexOfScalar(u8, path, '\\') orelse return error.InvalidPath;
@@ -543,29 +546,22 @@ fn updateFiles(path: []const u8) !void {
     var dir = try std.fs.openIterableDirAbsolute(dirname, .{});
     defer dir.close();
 
+    var allocator = main_mem.allocator();
     var iter = dir.iterate();
     while (try iter.next()) |entry| {
         if (entry.kind == .File and isSupported(entry.name)) {
-            const index = files.len;
-
             // Push file to the list
-            if (index == 0) {
-                files = try memory.alloc(FileInfo, 1);
-            } else {
-                try memory.resize(FileInfo, &files, index + 1);
-            }
-
-            assert(files.len == index + 1);
-
-            // Update browse index
-            if (std.mem.eql(u8, entry.name, filename)) curr_file = index;
+            var file = try files.addOne(allocator);
 
             // Copy full path
-            var file = &files[index];
-            file.* = .{ .name = try memory.stringAlloc(dirname.len + entry.name.len) };
+            file.* = .{ .name = try string_mem.alloc(u8, dirname.len + entry.name.len) };
 
             std.mem.copy(u8, file.name[0..dirname.len], dirname);
             std.mem.copy(u8, file.name[dirname.len..], entry.name);
+
+            // Update browse index
+            const index = files.items.len - 1;
+            if (std.mem.eql(u8, entry.name, filename)) curr_file = index;
         }
     }
 }
@@ -586,9 +582,9 @@ fn isSupported(filename: []const u8) bool {
 }
 
 fn messageBox(win: ?win32.HWND, comptime fmt: []const u8, args: anytype) !void {
-    const scratch = memory.beginScratch();
-    defer memory.endScratch(scratch);
-    var buf = try memory.alloc(u8, 4096);
+    const scratch = main_mem.beginScratch();
+    defer main_mem.endScratch(scratch);
+    var buf = try main_mem.alloc(u8, 4096);
 
     const out = try formatWstr(buf, fmt, args);
     _ = try win32.messageBox(win, out, app_name, 0);
@@ -597,24 +593,24 @@ fn messageBox(win: ?win32.HWND, comptime fmt: []const u8, args: anytype) !void {
 fn debugInfo(pb: win32.PaintBuffer) void {
     var y: i32 = 0;
 
-    const string_used = memory.stringUsedSize();
-    const string_commit = memory.stringCommitSize();
-    const total_commit = memory.volatile_commit + string_commit;
+    const total_commit = main_mem.commit_pos + string_mem.commit_pos;
+    const total_used = main_mem.alloc_pos + string_mem.alloc_pos;
 
     y = debugText(pb, y, debug_buf, "Debug mode", .{});
-    y = debugText(pb, y, debug_buf, "# files: {}", .{files.len});
+    y = debugText(pb, y, debug_buf, "# files: {}", .{files.items.len});
     y = debugText(pb, y, debug_buf, "Memory usage", .{});
     y = debugText(pb, y, debug_buf, "   Total: {}", .{total_commit});
-    y = debugText(pb, y, debug_buf, "   Persistent: {}", .{memory.volatile_start});
-    y = debugText(pb, y, debug_buf, "   Volatile:", .{});
-    y = debugText(pb, y, debug_buf, "      Committed: {}", .{memory.volatile_commit - memory.volatile_start});
-    y = debugText(pb, y, debug_buf, "      Used: {}", .{memory.volatile_end - memory.volatile_start});
-    y = debugText(pb, y, debug_buf, "      Waste: {}", .{memory.volatile_commit - memory.volatile_end});
+    y = debugText(pb, y, debug_buf, "      Committed: {}", .{total_commit});
+    y = debugText(pb, y, debug_buf, "      Used: {}", .{total_used});
+    y = debugText(pb, y, debug_buf, "      Waste: {}", .{total_commit - total_used});
+    y = debugText(pb, y, debug_buf, "   Main:", .{});
+    y = debugText(pb, y, debug_buf, "      Committed: {}", .{main_mem.commit_pos});
+    y = debugText(pb, y, debug_buf, "      Used: {}", .{main_mem.alloc_pos});
+    y = debugText(pb, y, debug_buf, "      Waste: {}", .{main_mem.commit_pos - main_mem.alloc_pos});
     y = debugText(pb, y, debug_buf, "   String", .{});
-    y = debugText(pb, y, debug_buf, "      Committed: {}", .{string_commit});
-    y = debugText(pb, y, debug_buf, "      Used: {}", .{string_used});
-    y = debugText(pb, y, debug_buf, "      Waste: {}", .{string_commit - string_used});
-    y = debugText(pb, y, debug_buf, "   Scratch stack: {}", .{memory.scratch_stack});
+    y = debugText(pb, y, debug_buf, "      Committed: {}", .{string_mem.commit_pos});
+    y = debugText(pb, y, debug_buf, "      Used: {}", .{string_mem.alloc_pos});
+    y = debugText(pb, y, debug_buf, "      Waste: {}", .{string_mem.commit_pos - string_mem.alloc_pos});
 }
 
 fn debugText(pb: win32.PaintBuffer, y: i32, buf: []u8, comptime fmt: []const u8, args: anytype) i32 {
