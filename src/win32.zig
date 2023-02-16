@@ -382,7 +382,7 @@ extern "uxtheme" fn BeginBufferedPaint(
     dwFormat: BP_BUFFERFORMAT,
     pPaintParams: ?*BP_PAINTPARAMS,
     phdc: *win32.HDC,
-) ?HPAINTBUFFER;
+) callconv(win32.WINAPI) ?HPAINTBUFFER;
 
 extern "uxtheme" fn EndBufferedPaint(
     hBufferedPaint: HPAINTBUFFER,
@@ -406,7 +406,7 @@ pub const SIZE = extern struct {
 pub extern "gdi32" fn SetBkMode(
     hdc: win32.HDC,
     mode: BkModes,
-) c_int;
+) callconv(win32.WINAPI) c_int;
 
 pub extern "gdi32" fn ExtTextOutW(
     hdc: win32.HDC,
@@ -424,7 +424,7 @@ pub extern "gdi32" fn GetTextExtentPoint32W(
     lpString: win32.LPCWSTR,
     c: c_int,
     psizl: *SIZE,
-) c_int;
+) callconv(win32.WINAPI) c_int;
 
 //=== File dialogs ===//
 
@@ -527,4 +527,4 @@ pub fn createMemStream(mem: []const u8) !*IStream {
     ) orelse error.Unexpected;
 }
 
-extern "shlwapi" fn SHCreateMemStream(pInit: [*]const u8, cbInit: win32.UINT) ?*IStream;
+extern "shlwapi" fn SHCreateMemStream(pInit: [*]const u8, cbInit: win32.UINT) callconv(win32.WINAPI) ?*IStream;
