@@ -164,7 +164,7 @@ pub fn panic(err: []const u8, maybe_trace: ?*std.builtin.StackTrace, ret_addr: ?
     // Win32 a lot of UTF8<->UTF16 conversions are involved; maybe we can mitigate
     // this a bit by fully embracing Win32 and UTF16.
     var alloc = std.heap.FixedBufferAllocator.init(buf.writableSlice(0));
-    _ = win32.messageBox(
+    _ = win32.messageBoxW(
         null,
         std.unicode.utf8ToUtf16LeWithNull(alloc.allocator(), buf.readableSlice(0)) catch unreachable,
         app_name,
@@ -225,7 +225,7 @@ fn innerMain() anyerror!void {
         .lpszMenuName = null,
     };
 
-    _ = try win32.registerClassEx(&win_class);
+    _ = try win32.registerClassExW(&win_class);
 
     // Init buffered painting
     try win32.initBufferedPaint();
@@ -242,7 +242,7 @@ fn innerMain() anyerror!void {
     );
 
     const win_flags = win32.WS_OVERLAPPEDWINDOW;
-    const win = try win32.createWindowEx(
+    const win = try win32.createWindowExW(
         0,
         app_name,
         app_name,
@@ -282,13 +282,13 @@ fn innerMain() anyerror!void {
     var msg: win32.MSG = undefined;
 
     while (true) {
-        win32.getMessage(&msg, null, 0, 0) catch |err| switch (err) {
+        win32.getMessageW(&msg, null, 0, 0) catch |err| switch (err) {
             error.Quit => break,
             else => return err,
         };
 
         _ = win32.translateMessage(&msg);
-        _ = win32.dispatchMessage(&msg);
+        _ = win32.dispatchMessageW(&msg);
     }
 }
 
@@ -301,7 +301,7 @@ fn wndProc(
     return if (processEvent(win, msg, wparam, lparam) catch unreachable)
         0
     else
-        win32.defWindowProc(win, msg, wparam, lparam);
+        win32.defWindowProcW(win, msg, wparam, lparam);
 }
 
 fn processEvent(
@@ -588,7 +588,7 @@ fn messageBox(win: ?win32.HWND, comptime fmt: []const u8, args: anytype) !void {
     var buf = try main_mem.alloc(u8, 4096);
 
     const out = try formatWstr(buf, fmt, args);
-    _ = try win32.messageBox(win, out, app_name, 0);
+    _ = try win32.messageBoxW(win, out, app_name, 0);
 }
 
 fn debugInfo(pb: win32.PaintBuffer) void {
