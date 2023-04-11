@@ -73,7 +73,11 @@ pub inline fn alloc(self: *Memory, comptime T: type, count: usize) Error![]T {
     return self.allocator().alloc(T, count);
 }
 
-pub fn allocAlign(
+pub inline fn isLastAllocation(self: *Memory, mem: []u8) bool {
+    return (self.bytes.ptr + self.alloc_pos) == (mem.ptr + mem.len);
+}
+
+fn allocAlign(
     self: *Memory,
     size: usize,
     buf_align: u29,
@@ -96,11 +100,7 @@ pub fn allocAlign(
     return self.bytes[mem_start..mem_end];
 }
 
-pub inline fn isLastAllocation(self: *Memory, mem: []u8) bool {
-    return (self.bytes.ptr + self.alloc_pos) == (mem.ptr + mem.len);
-}
-
-pub fn resize(
+fn resize(
     self: *Memory,
     buf: []u8,
     buf_align: u29,
@@ -131,7 +131,7 @@ pub fn resize(
     return new_size;
 }
 
-pub fn free(
+fn free(
     self: *Memory,
     buf: []u8,
     buf_align: u29,
