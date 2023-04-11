@@ -104,7 +104,7 @@ const ImageCache = struct {
     }
 
     pub fn clear(self: *Self) void {
-        for (self.nodes) |*node| {
+        for (&self.nodes) |*node| {
             switch (node.val) {
                 .Loaded => |ptr| gdip.checkStatus(gdip.disposeImage(ptr)) catch unreachable,
                 else => {},
@@ -574,7 +574,8 @@ fn isSupported(filename: []const u8) bool {
 
     assert(ext[ext.len - 1] != 0);
 
-    for (extensions) |token| {
+    for (extensions, 0..) |token, index| {
+        _ = index;
         if (std.ascii.eqlIgnoreCase(token, ext)) return true;
     }
 

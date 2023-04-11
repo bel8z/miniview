@@ -62,7 +62,14 @@ pub fn decommitExcess(self: *Memory) void {
 }
 
 pub inline fn allocator(self: *Memory) Allocator {
-    return Allocator.init(self, allocAlign, resize, free);
+    return .{
+        .ptr = self,
+        .vtable = &.{
+            .alloc = allocAlign,
+            .resize = resize,
+            .free = free,
+        },
+    };
 }
 
 pub inline fn allocOne(self: *Memory, comptime T: type) Error!*T {
@@ -77,68 +84,76 @@ pub inline fn isLastAllocation(self: *Memory, mem: []u8) bool {
     return (self.bytes.ptr + self.alloc_pos) == (mem.ptr + mem.len);
 }
 
+inline fn selfCast(ptr: *anyopaque) *Memory {
+    return @ptrCast(*Memory, @alignCast(@alignOf(Memory), ptr));
+}
+
 fn allocAlign(
-    self: *Memory,
+    ptr: *anyopaque,
     size: usize,
-    buf_align: u29,
-    len_align: u29,
+    ptr_align_log2: u8,
     return_address: usize,
-) ![]u8 {
-    _ = len_align;
+) ?[*]u8 {
     _ = return_address;
 
-    const offset = std.mem.alignPointerOffset(self.bytes.ptr + self.alloc_pos, buf_align) orelse
-        return error.OutOfMemory;
+    const self = selfCast(ptr);
+    const ptr_align = @as(usize, 1) << @intCast(Allocator.Log2Align, ptr_align_log2);
 
-    const mem_start = self.alloc_pos + offset;
-    const mem_end = mem_start + size;
-    if (mem_end > self.bytes.len) return error.OutOfMemory;
+    if (std.mem.alignPointerOffset(self.bytes.ptr + self.alloc_pos, ptr_align)) |offset| {
+        const mem_start = self.alloc_pos + offset;
+        const mem_end = mem_start + size;
+        if (mem_end <= self.bytes.len) {
+            if (self.commitVolatile(mem_end)) {
+                self.alloc_pos = mem_end;
+                return self.bytes.ptr + mem_start;
+            } else |_| {}
+        }
+    }
 
-    try self.commitVolatile(mem_end);
-    self.alloc_pos = mem_end;
-
-    return self.bytes[mem_start..mem_end];
+    return null;
 }
 
 fn resize(
-    self: *Memory,
+    ptr: *anyopaque,
     buf: []u8,
-    buf_align: u29,
+    ptr_align_log2: u8,
     new_size: usize,
-    len_align: u29,
     return_address: usize,
-) ?usize {
-    _ = buf_align;
+) bool {
+    _ = ptr_align_log2;
     _ = return_address;
 
+    const self = selfCast(ptr);
+
     if (!self.isLastAllocation(buf)) {
-        if (new_size > buf.len) return null;
-        return std.mem.alignAllocLen(buf.len, new_size, len_align);
+        return (new_size <= buf.len);
     }
 
     if (new_size <= buf.len) {
         const sub = buf.len - new_size;
         self.alloc_pos -= sub;
-        return std.mem.alignAllocLen(new_size, new_size, len_align);
+        return true;
     }
 
     const add = new_size - buf.len;
     const next_pos = self.alloc_pos + add;
-    if (next_pos > self.bytes.len) return null;
-    self.commitVolatile(next_pos) catch return null;
+    if (next_pos > self.bytes.len) return false;
+    self.commitVolatile(next_pos) catch return false;
 
     self.alloc_pos = next_pos;
-    return new_size;
+    return true;
 }
 
 fn free(
-    self: *Memory,
+    ptr: *anyopaque,
     buf: []u8,
-    buf_align: u29,
+    ptr_align_log2: u8,
     return_address: usize,
 ) void {
-    _ = buf_align;
+    _ = ptr_align_log2;
     _ = return_address;
+
+    const self = selfCast(ptr);
 
     if (self.isLastAllocation(buf)) {
         self.alloc_pos -= buf.len;
