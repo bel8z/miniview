@@ -125,9 +125,7 @@ fn resize(
 
     const self = selfCast(ptr);
 
-    if (!self.isLastAllocation(buf)) {
-        return (new_size <= buf.len);
-    }
+    if (!self.isLastAllocation(buf)) return (new_size <= buf.len);
 
     if (new_size <= buf.len) {
         const sub = buf.len - new_size;
@@ -155,9 +153,7 @@ fn free(
 
     const self = selfCast(ptr);
 
-    if (self.isLastAllocation(buf)) {
-        self.alloc_pos -= buf.len;
-    }
+    if (self.isLastAllocation(buf)) self.alloc_pos -= buf.len;
 }
 
 /// Helper struct used to handle temporary (scratch) usage of volatile allocations
