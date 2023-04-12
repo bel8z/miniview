@@ -451,4 +451,14 @@ pub fn createMemStream(mem: []const u8) !*IStream {
     ) orelse error.Unexpected;
 }
 
-extern "shlwapi" fn SHCreateMemStream(pInit: [*]const u8, cbInit: win32.UINT) callconv(win32.WINAPI) ?*IStream;
+extern "shlwapi" fn SHCreateMemStream(
+    pInit: [*]const u8,
+    cbInit: win32.UINT,
+) callconv(win32.WINAPI) ?*IStream;
+
+//=== COM stuff ===//
+
+pub extern "kernel32" fn AttachConsole(dwProcessId: u32) callconv(win32.WINAPI) win32.BOOL;
+pub extern "kernel32" fn AllocConsole() callconv(win32.WINAPI) win32.BOOL;
+pub extern "kernel32" fn FreeConsole() callconv(win32.WINAPI) win32.BOOL;
+pub extern "kernel32" fn SetConsoleTitleW(lpConsoleTitle: win32.LPCWSTR) callconv(win32.WINAPI) win32.BOOL;
