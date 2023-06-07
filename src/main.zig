@@ -39,6 +39,9 @@ const extensions = init: {
     break :init temp;
 };
 
+// TODO (Matteo): Prefefetch asynchronously
+const prefetch = false;
+
 //=== Data structs ===//
 
 fn RingBuffer(comptime T: type) type {
@@ -437,27 +440,45 @@ fn open(win: win32.HWND) !void {
 }
 
 fn updateImage(win: win32.HWND) !void {
-    if (files.items.len == 0) return;
+    const file_count = files.items.len;
+    if (file_count == 0) return;
 
     assert(curr_file >= 0);
 
-    const file = &files.items[curr_file];
+    const file_name = files.items[curr_file].name;
+
+    curr_image = loadInCache(curr_file) catch |err| switch (err) {
+        error.InvalidParameter => {
+            try messageBox(win, "Invalid image file: {s}", .{file_name});
+            return;
+        },
+        else => return err,
+    };
+
+    if (win32.InvalidateRect(win, null, win32.TRUE) == 0) return error.Unexpected;
+    try setTitle(win, file_name);
+
+    // TODO (Matteo): Prefefetch asynchronously
+    if (prefetch) {
+        const prev_file = if (curr_file == 0) file_count - 1 else curr_file - 1;
+        const next_file = if (curr_file == file_count - 1) 0 else curr_file + 1;
+        _ = loadInCache(next_file) catch {};
+        _ = loadInCache(prev_file) catch {};
+    }
+}
+
+fn loadInCache(index: usize) !*gdip.Image {
+    const file = &files.items[index];
 
     while (true) {
         if (images.get(file.handle)) |cached| {
             switch (cached.*) {
                 .None => {
-                    const image = loadImageFile(file.name) catch |err| switch (err) {
-                        error.InvalidParameter => {
-                            try messageBox(win, "Invalid image file: {s}", .{file.name});
-                            return;
-                        },
-                        else => return err,
-                    };
+                    const image = try loadImageFile(file.name);
                     cached.* = .{ .Loaded = image };
-                    curr_image = image;
+                    return image;
                 },
-                .Loaded => |image| curr_image = image,
+                .Loaded => |image| return image,
             }
 
             break;
@@ -465,9 +486,6 @@ fn updateImage(win: win32.HWND) !void {
 
         file.handle = images.new();
     }
-
-    if (win32.InvalidateRect(win, null, win32.TRUE) == 0) return error.Unexpected;
-    try setTitle(win, file.name);
 }
 
 fn loadImageFile(file_name: []const u8) !*gdip.Image {
