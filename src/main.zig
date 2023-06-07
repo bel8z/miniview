@@ -549,7 +549,7 @@ fn updateFiles(path: []const u8) !void {
     var allocator = main_mem.allocator();
     var iter = dir.iterate();
     while (try iter.next()) |entry| {
-        if (entry.kind == .File and isSupported(entry.name)) {
+        if (entry.kind == .file and isSupported(entry.name)) {
             // Push file to the list
             var file = try files.addOne(allocator);
 
