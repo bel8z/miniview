@@ -18,14 +18,14 @@ commit_pos: usize = 0,
 scratch_stack: usize = 0,
 
 pub fn rawReserve(capacity: usize) win32.VirtualAllocError![]u8 {
-    const bytes = @ptrCast([*]u8, try win32.VirtualAlloc(
+    const bytes = @as([*]u8, @ptrCast(try win32.VirtualAlloc(
         null,
         capacity,
         win32.MEM_RESERVE,
         win32.PAGE_NOACCESS,
-    ))[0..capacity];
+    )))[0..capacity];
 
-    assert(std.mem.isAligned(@ptrToInt(bytes.ptr), std.mem.page_size));
+    assert(std.mem.isAligned(@intFromPtr(bytes.ptr), std.mem.page_size));
 
     return bytes;
 }
@@ -52,7 +52,7 @@ pub fn decommitExcess(self: *Memory) void {
 
     if (min_commit < self.commit_pos) {
         win32.VirtualFree(
-            @ptrCast(win32.LPVOID, self.bytes.ptr + min_commit),
+            @as(win32.LPVOID, @ptrCast(self.bytes.ptr + min_commit)),
             self.commit_pos - min_commit,
             win32.MEM_DECOMMIT,
         );
@@ -85,7 +85,7 @@ pub inline fn isLastAllocation(self: *Memory, mem: []u8) bool {
 }
 
 inline fn selfCast(ptr: *anyopaque) *Memory {
-    return @ptrCast(*Memory, @alignCast(@alignOf(Memory), ptr));
+    return @as(*Memory, @ptrCast(@alignCast(ptr)));
 }
 
 fn allocAlign(
@@ -97,7 +97,7 @@ fn allocAlign(
     _ = return_address;
 
     const self = selfCast(ptr);
-    const ptr_align = @as(usize, 1) << @intCast(Allocator.Log2Align, ptr_align_log2);
+    const ptr_align = @as(usize, 1) << @as(Allocator.Log2Align, @intCast(ptr_align_log2));
 
     if (std.mem.alignPointerOffset(self.bytes.ptr + self.alloc_pos, ptr_align)) |offset| {
         const mem_start = self.alloc_pos + offset;
@@ -175,11 +175,11 @@ pub fn endScratch(self: *Memory, scope: ScratchScope) void {
 }
 
 fn commitVolatile(self: *Memory, target: usize) Error!void {
-    const min_commit = std.mem.alignForward(target, std.mem.page_size);
+    const min_commit = std.mem.alignForward(usize, target, std.mem.page_size);
 
     if (min_commit > self.commit_pos) {
         _ = win32.VirtualAlloc(
-            @ptrCast(win32.LPVOID, self.bytes.ptr + self.commit_pos),
+            @as(win32.LPVOID, @ptrCast(self.bytes.ptr + self.commit_pos)),
             min_commit - self.commit_pos,
             win32.MEM_COMMIT,
             win32.PAGE_READWRITE,

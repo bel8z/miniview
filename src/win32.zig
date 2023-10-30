@@ -13,16 +13,16 @@ pub usingnamespace win32.user32;
 pub const L = std.unicode.utf8ToUtf16LeStringLiteral;
 
 /// Returns the HINSTANCE corresponding to the process executable
-pub fn getCurrentInstance() win32.HINSTANCE {
-    return @ptrCast(
+pub inline fn getCurrentInstance() win32.HINSTANCE {
+    return @as(
         win32.HINSTANCE,
-        win32.kernel32.GetModuleHandleW(null) orelse unreachable,
+        @ptrCast(win32.kernel32.GetModuleHandleW(null) orelse unreachable),
     );
 }
 
 pub inline fn loadProc(comptime T: type, comptime name: [*:0]const u8, handle: win32.HMODULE) Error!T {
-    return @ptrCast(T, win32.kernel32.GetProcAddress(handle, name) orelse
-        return error.Unexpected);
+    return @as(T, @ptrCast(win32.kernel32.GetProcAddress(handle, name) orelse
+        return error.Unexpected));
 }
 
 pub inline fn setWindowText(
@@ -37,17 +37,73 @@ extern "user32" fn SetWindowTextW(
     lpString: win32.LPCWSTR,
 ) callconv(win32.WINAPI) win32.BOOL;
 
+pub inline fn setProcessDpiAware() !void {
+    const DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4;
+    const res = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    if (res != win32.TRUE) return error.Unexpected;
+}
+
+extern "user32" fn SetProcessDpiAwarenessContext(
+    value: isize,
+) callconv(win32.WINAPI) win32.BOOL;
+
+pub extern "user32" fn GetDpiForWindow(
+    hwnd: win32.HWND,
+) callconv(win32.WINAPI) c_uint;
+
+pub extern "user32" fn GetClientRect(
+    hwnd: win32.HWND,
+    rect_ptr: *win32.RECT,
+) callconv(win32.WINAPI) win32.BOOL;
+
+pub extern "user32" fn GetCursorPos(
+    out_point: *win32.POINT,
+) callconv(win32.WINAPI) win32.BOOL;
+
+extern "user32" fn GetAsyncKeyState(
+    vkey: c_int,
+) callconv(win32.WINAPI) i16;
+
+pub inline fn isKeyPressed(vkey: c_int) bool {
+    const word: u16 = @bitCast(GetAsyncKeyState(vkey));
+    return ((word & 0x8000) != 0);
+}
+
+pub extern "user32" fn SetTimer(
+    hwnd: win32.HWND,
+    event_id: isize,
+    ms_timeout: c_uint,
+    timer_fn: ?*anyopaque,
+) callconv(win32.WINAPI) isize;
+
+pub extern "user32" fn KillTimer(
+    hwnd: win32.HWND,
+    event_id: isize,
+) callconv(win32.WINAPI) win32.BOOL;
+
+pub extern "user32" fn ScreenToClient(
+    hwnd: win32.HWND,
+    point: *win32.POINT,
+) callconv(win32.WINAPI) win32.BOOL;
+
+extern "user32" fn WaitMessage() callconv(win32.WINAPI) win32.BOOL;
+
+pub inline fn waitMessage() !void {
+    const res = WaitMessage();
+    if (res == 0) return error.Unexpected;
+}
+
 //=== Command line ===//
 
 pub fn getArgs() []win32.LPWSTR {
     const cmd_line = win32.kernel32.GetCommandLineW();
     var argc: c_int = undefined;
     const argv = CommandLineToArgvW(cmd_line, &argc);
-    return argv[0..@intCast(usize, argc)];
+    return argv[0..@as(usize, @intCast(argc))];
 }
 
-pub fn freeArgs(args: []win32.LPWSTR) void {
-    win32.LocalFree(@ptrCast(win32.HLOCAL, args.ptr));
+pub inline fn freeArgs(args: []win32.LPWSTR) void {
+    win32.LocalFree(@as(win32.HLOCAL, @ptrCast(args.ptr)));
 }
 
 extern "shell32" fn CommandLineToArgvW(
@@ -64,10 +120,10 @@ pub inline fn compareStringOrdinal(
 ) Error!std.math.Order {
     const cmp = CompareStringOrdinal(
         string1.ptr,
-        @intCast(c_int, string1.len),
+        @as(c_int, @intCast(string1.len)),
         string2.ptr,
-        @intCast(c_int, string2.len),
-        @boolToInt(ignore_case),
+        @as(c_int, @intCast(string2.len)),
+        @intFromBool(ignore_case),
     );
 
     return switch (cmp) {
@@ -145,12 +201,12 @@ pub const CursorId = enum(u16) {
     No = 32648,
 };
 
-pub fn getDefaultCursor() win32.HCURSOR {
+pub inline fn getDefaultCursor() win32.HCURSOR {
     return getStandardCursor(.Arrow) catch unreachable;
 }
 
-pub fn getStandardCursor(id: CursorId) Error!win32.HCURSOR {
-    const name = @intToPtr(win32.LPCWSTR, @enumToInt(id));
+pub inline fn getStandardCursor(id: CursorId) Error!win32.HCURSOR {
+    const name = @as(win32.LPCWSTR, @ptrFromInt(@intFromEnum(id)));
     return LoadCursorW(null, name) orelse error.Unexpected;
 }
 
@@ -180,14 +236,14 @@ pub const MenuItem = union(enum) {
     OwnerDraw: struct { id: u32, data: *anyopaque },
 };
 
-pub fn createMenu() Error!win32.HMENU {
+pub inline fn createMenu() Error!win32.HMENU {
     return CreateMenu() orelse error.Unexpected;
 }
 
 pub fn appendMenu(menu: win32.HMENU, item: MenuItem, flags: u32) Error!void {
     const res = switch (item) {
-        .String => |x| AppendMenuW(menu, flags, menuIdToPtr(x.id), @ptrCast(*const anyopaque, x.str)),
-        .Popup => |x| AppendMenuW(menu, flags, @ptrCast(*anyopaque, x.sub_menu), @ptrCast(*const anyopaque, x.name)),
+        .String => |x| AppendMenuW(menu, flags, menuIdToPtr(x.id), @as(*const anyopaque, @ptrCast(x.str))),
+        .Popup => |x| AppendMenuW(menu, flags, @as(*anyopaque, @ptrCast(x.sub_menu)), @as(*const anyopaque, @ptrCast(x.name))),
         .Bitmap => |x| AppendMenuW(menu, flags, menuIdToPtr(x.id), x.handle),
         .OwnerDraw => |x| AppendMenuW(menu, flags, menuIdToPtr(x.id), x.data),
     };
@@ -196,7 +252,7 @@ pub fn appendMenu(menu: win32.HMENU, item: MenuItem, flags: u32) Error!void {
 }
 
 inline fn menuIdToPtr(id: u32) *const anyopaque {
-    return @intToPtr(*const anyopaque, id);
+    return @as(*const anyopaque, @ptrFromInt(id));
 }
 
 extern "user32" fn CreateMenu() callconv(win32.WINAPI) ?win32.HMENU;
@@ -218,7 +274,17 @@ pub const PAINTSTRUCT = extern struct {
     rgbReserved: [32]u8,
 };
 
-pub const PaintBuffer = struct {
+pub inline fn beginPaint(win: win32.HWND, ps: *PAINTSTRUCT) Error!win32.HDC {
+    return BeginPaint(win, ps) orelse error.Unexpected;
+}
+
+pub inline fn endPaint(win: win32.HWND, ps: *const PAINTSTRUCT) Error!void {
+    if (EndPaint(win, ps) != win32.TRUE) return error.Unexpected;
+}
+
+pub const BufferedPaint = struct {
+    /// Window affected by the painting
+    win: win32.HWND,
     /// Memory DC to be used for painting
     dc: win32.HDC,
     // Paint information returned by BeginPaint
@@ -226,56 +292,69 @@ pub const PaintBuffer = struct {
     // Internal, opaque paint buffer handle
     pb: HPAINTBUFFER,
 
-    pub fn clear(self: *PaintBuffer, rect: win32.RECT) Error!void {
-        const hr = BufferedPaintClear(self.pb, &rect);
+    /// Initialize buffered painting for the current thread
+    pub inline fn init() Error!void {
+        const hr = BufferedPaintInit();
         if (hr != 0) {
-            SetLastError(@intCast(u32, hr));
+            SetLastError(@as(u32, @intCast(hr)));
+            return error.Unexpected;
+        }
+    }
+
+    /// Shutdown buffered painting for the current thread
+    pub inline fn deinit() void {
+        const hr = BufferedPaintUnInit();
+        if (hr != 0) {
+            SetLastError(@as(u32, @intCast(hr)));
+            unreachable;
+        }
+    }
+
+    /// Begin buffered painting session for the given window
+    pub inline fn begin(
+        win: win32.HWND,
+    ) Error!BufferedPaint {
+        var out: BufferedPaint = undefined;
+
+        const win_dc = try beginPaint(win, &out.ps);
+
+        // TODO (Matteo): Is it better to always paint the client rectangle explicitly?
+        if (BeginBufferedPaint(win_dc, &out.ps.rcPaint, .COMPATIBLEBITMAP, null, &out.dc)) |pb| {
+            out.win = win;
+            out.pb = pb;
+            return out;
+        }
+
+        return error.Unexpected;
+    }
+
+    /// End buffered painting
+    pub inline fn end(pb: BufferedPaint) Error!void {
+        const hr = EndBufferedPaint(pb.pb, win32.TRUE);
+        if (hr != 0) {
+            SetLastError(@as(u32, @intCast(hr)));
+            return error.Unexpected;
+        }
+
+        try endPaint(pb.win, &pb.ps);
+    }
+
+    pub const Area = union(enum) { All, Rect: win32.RECT };
+
+    /// Clear an area of the buffer defined by the given rectangle
+    pub inline fn clear(self: *const BufferedPaint, area: Area) Error!void {
+        const rect_ptr = switch (area) {
+            .All => null,
+            .Rect => |*rect| rect,
+        };
+
+        const hr = BufferedPaintClear(self.pb, rect_ptr);
+        if (hr != 0) {
+            SetLastError(@as(u32, @intCast(hr)));
             return error.Unexpected;
         }
     }
 };
-
-pub inline fn initBufferedPaint() Error!void {
-    const hr = BufferedPaintInit();
-    if (hr != 0) {
-        SetLastError(@intCast(u32, hr));
-        return error.Unexpected;
-    }
-}
-
-pub inline fn deinitBufferedPaint() void {
-    const hr = BufferedPaintUnInit();
-    if (hr != 0) {
-        SetLastError(@intCast(u32, hr));
-        unreachable;
-    }
-}
-
-pub inline fn beginBufferedPaint(
-    win: win32.HWND,
-) Error!PaintBuffer {
-    var out: PaintBuffer = undefined;
-
-    if (BeginPaint(win, &out.ps)) |win_dc| {
-        // TODO (Matteo): Is it better to always paint the client rectangle explicitly?
-        if (BeginBufferedPaint(win_dc, &out.ps.rcPaint, .COMPATIBLEBITMAP, null, &out.dc)) |pb| {
-            out.pb = pb;
-            return out;
-        }
-    }
-
-    return error.Unexpected;
-}
-
-pub inline fn endBufferedPaint(win: win32.HWND, pb: PaintBuffer) Error!void {
-    const hr = EndBufferedPaint(pb.pb, win32.TRUE);
-    if (hr != 0) {
-        SetLastError(@intCast(u32, hr));
-        return error.Unexpected;
-    }
-
-    if (EndPaint(win, &pb.ps) != win32.TRUE) unreachable;
-}
 
 pub extern "user32" fn InvalidateRect(
     hWnd: win32.HWND,
@@ -315,7 +394,7 @@ extern "uxtheme" fn EndBufferedPaint(
 
 extern "uxtheme" fn BufferedPaintClear(
     hBufferedPaint: HPAINTBUFFER,
-    prc: *const win32.RECT,
+    prc: ?*const win32.RECT,
 ) callconv(win32.WINAPI) win32.HRESULT;
 
 //=== Drawing ===//
@@ -378,7 +457,7 @@ pub const OPENFILENAMEW = extern struct {
     FlagsEx: u32 = 0,
 };
 
-pub fn getOpenFileName(ofn: *OPENFILENAMEW) Error!bool {
+pub inline fn getOpenFileName(ofn: *OPENFILENAMEW) Error!bool {
     std.debug.assert(ofn.lStructSize == @sizeOf(OPENFILENAMEW));
 
     if (GetOpenFileNameW(ofn) == win32.TRUE) return true;
@@ -444,10 +523,10 @@ pub const IStream = extern struct {
     };
 };
 
-pub fn createMemStream(mem: []const u8) !*IStream {
+pub inline fn createMemStream(mem: []const u8) !*IStream {
     return SHCreateMemStream(
         mem.ptr,
-        @intCast(win32.UINT, mem.len),
+        @as(win32.UINT, @intCast(mem.len)),
     ) orelse error.Unexpected;
 }
 
@@ -456,7 +535,7 @@ extern "shlwapi" fn SHCreateMemStream(
     cbInit: win32.UINT,
 ) callconv(win32.WINAPI) ?*IStream;
 
-//=== COM stuff ===//
+//=== Console ===//
 
 pub extern "kernel32" fn AttachConsole(dwProcessId: u32) callconv(win32.WINAPI) win32.BOOL;
 pub extern "kernel32" fn AllocConsole() callconv(win32.WINAPI) win32.BOOL;

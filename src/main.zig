@@ -55,11 +55,11 @@ const ImageCache = struct {
         gen: Int = 0,
 
         pub inline fn toInt(handle: Handle) usize {
-            return @bitCast(usize, handle);
+            return @as(usize, @bitCast(handle));
         }
 
         pub inline fn fromInt(int: usize) Handle {
-            return @bitCast(Handle, int);
+            return @as(Handle, @bitCast(int));
         }
     };
 
@@ -231,7 +231,7 @@ fn innerMain() anyerror!void {
     _ = try win32.registerClassExW(&win_class);
 
     // Init buffered painting
-    try win32.initBufferedPaint();
+    try win32.BufferedPaint.init();
 
     // Init GDI+
     try gdip.init();
@@ -240,7 +240,7 @@ fn innerMain() anyerror!void {
     const menu = try win32.createMenu();
     try win32.appendMenu(
         menu,
-        .{ .String = .{ .id = @enumToInt(Command.Open), .str = L("Open") } },
+        .{ .String = .{ .id = @intFromEnum(Command.Open), .str = L("Open") } },
         0,
     );
 
@@ -319,8 +319,8 @@ fn processEvent(
         win32.WM_CLOSE => try win32.destroyWindow(win),
         win32.WM_DESTROY => win32.PostQuitMessage(0),
         win32.WM_PAINT => {
-            const pb = try win32.beginBufferedPaint(win);
-            defer win32.endBufferedPaint(win, pb) catch unreachable;
+            const pb = try win32.BufferedPaint.begin(win);
+            defer pb.end() catch unreachable;
 
             // The background is not erased since the given brush is null
             assert(pb.ps.fErase == win32.TRUE);
@@ -329,7 +329,7 @@ fn processEvent(
         },
         win32.WM_COMMAND => {
             if (wparam & 0xffff0000 == 0) {
-                const command = @intToEnum(Command, wparam & 0xffff);
+                const command = @as(Command, @enumFromInt(wparam & 0xffff));
                 switch (command) {
                     .Open => try open(win),
                 }
@@ -352,7 +352,7 @@ fn processEvent(
     return true;
 }
 
-fn paint(pb: win32.PaintBuffer) !void {
+fn paint(pb: win32.BufferedPaint) !void {
     var gfx: *gdip.Graphics = undefined;
     try gdip.checkStatus(gdip.createFromHDC(pb.dc, &gfx));
     defer gdip.checkStatus(gdip.deleteGraphics(gfx)) catch unreachable;
@@ -362,14 +362,14 @@ fn paint(pb: win32.PaintBuffer) !void {
     if (curr_image) |bmp| {
         // Compute dimensions
         const bounds = pb.ps.rcPaint;
-        const bounds_w = @intToFloat(f32, bounds.right - bounds.left);
-        const bounds_h = @intToFloat(f32, bounds.bottom - bounds.top);
+        const bounds_w = @as(f32, @floatFromInt(bounds.right - bounds.left));
+        const bounds_h = @as(f32, @floatFromInt(bounds.bottom - bounds.top));
         var img_w: f32 = undefined;
         var img_h: f32 = undefined;
         try gdip.checkStatus(gdip.getImageDimension(bmp, &img_w, &img_h));
 
         // Downscale out-of-bounds images
-        var scale = std.math.min(bounds_w / img_w, bounds_h / img_h);
+        var scale = @min(bounds_w / img_w, bounds_h / img_h);
         if (scale < 1) {
             // Bicubic interpolation displays better results when downscaling
             try gdip.checkStatus(gdip.setInterpolationMode(gfx, .HighQualityBicubic));
@@ -419,11 +419,11 @@ fn open(win: win32.HWND) !void {
     var buf16 = [_]u16{0} ** max_path_size;
     var buf8 = [_]u8{0} ** (2 * max_path_size);
 
-    var ptr = @ptrCast([*:0]u16, &buf16[0]);
+    var ptr = @as([*:0]u16, @ptrCast(&buf16[0]));
     var ofn = win32.OPENFILENAMEW{
         .hwndOwner = win,
         .lpstrFile = ptr,
-        .nMaxFile = @intCast(u32, buf16.len),
+        .nMaxFile = @as(u32, @intCast(buf16.len)),
         .lpstrFilter = L("Image files\x00") ++ filter ++ L("\x00"),
     };
 
@@ -507,7 +507,7 @@ fn loadImageFile(file_name: []const u8) !*gdip.Image {
     // Read all file in a temporary block
     const scratch = main_mem.beginScratch();
     defer main_mem.endScratch(scratch);
-    const size = @intCast(usize, try win32.GetFileSizeEx(file));
+    const size = @as(usize, @intCast(try win32.GetFileSizeEx(file)));
     const block = try main_mem.alloc(u8, size);
 
     // Emulate asyncronous read
@@ -519,7 +519,7 @@ fn loadImageFile(file_name: []const u8) !*gdip.Image {
     if (win32.kernel32.ReadFile(
         file,
         block.ptr,
-        @intCast(u32, size),
+        @as(u32, @intCast(size)),
         null,
         &ovp_in,
     ) == 0) {
@@ -609,7 +609,7 @@ fn messageBox(win: ?win32.HWND, comptime fmt: []const u8, args: anytype) !void {
     _ = try win32.messageBoxW(win, out, app_name, 0);
 }
 
-fn debugInfo(pb: win32.PaintBuffer) void {
+fn debugInfo(pb: win32.BufferedPaint) void {
     var y: i32 = 0;
 
     const total_commit = main_mem.commit_pos + string_mem.commit_pos;
@@ -632,11 +632,11 @@ fn debugInfo(pb: win32.PaintBuffer) void {
     y = debugText(pb, y, debug_buf, "      Waste: {}", .{string_mem.commit_pos - string_mem.alloc_pos});
 }
 
-fn debugText(pb: win32.PaintBuffer, y: i32, buf: []u8, comptime fmt: []const u8, args: anytype) i32 {
+fn debugText(pb: win32.BufferedPaint, y: i32, buf: []u8, comptime fmt: []const u8, args: anytype) i32 {
     _ = win32.SetBkMode(pb.dc, .Transparent);
 
     const text = formatWstr(buf, fmt, args) catch return y;
-    const text_len = @intCast(c_int, text.len);
+    const text_len = @as(c_int, @intCast(text.len));
 
     var cur_y = y + 1;
     _ = win32.ExtTextOutW(pb.dc, 1, cur_y, 0, null, text.ptr, text_len, null);
@@ -656,6 +656,6 @@ fn formatWstr(buf: []u8, comptime fmt: []const u8, args: anytype) ![:0]const u16
 }
 
 inline fn argb(a: u8, r: u8, g: u8, b: u8) u32 {
-    return @intCast(u32, a) << 24 | @intCast(u32, r) << 16 |
-        @intCast(u32, g) << 8 | b;
+    return @as(u32, @intCast(a)) << 24 | @as(u32, @intCast(r)) << 16 |
+        @as(u32, @intCast(g)) << 8 | b;
 }
