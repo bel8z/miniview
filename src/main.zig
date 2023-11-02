@@ -555,6 +555,9 @@ fn updateFiles(path: []const u8) !void {
     curr_file = 0;
     assert(main_mem.scratch_stack == 0);
 
+    // String storage is used only for the file list, so we can clear it as well
+    string_mem.clear();
+
     // Split path in file and directory names
     const sep = std.mem.lastIndexOfScalar(u8, path, '\\') orelse return error.InvalidPath;
     const dirname = path[0 .. sep + 1];
