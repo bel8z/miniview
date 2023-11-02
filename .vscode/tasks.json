@@ -31,7 +31,6 @@
                 "build",
                 "run",
                 "-Dconsole",
-                //--prefix ./build/ --prefix-lib-dir . --prefix-exe-dir . --cache-dir ./build/cache
             ],
             "group": {
                 "kind": "build",
@@ -65,7 +64,7 @@
             "command": "zig",
             "args": [
                 "build",
-                "-Drelease-safe",
+                "-Doptimize=ReleaseSafe",
             ],
             "group": {
                 "kind": "build",

@@ -8,8 +8,8 @@
             "type": "cppvsdbg",
             "request": "launch",
             "name": "Launch program",
-            "program": "${workspaceRoot}/build/miniview.exe",
-            "cwd": "${workspaceRoot}/build",
+            "program": "${workspaceRoot}/zig-out/bin/miniview.exe",
+            "cwd": "${workspaceRoot}/zig-out/bin",
             "preLaunchTask": "Build (Debug)",
         }
     ]
