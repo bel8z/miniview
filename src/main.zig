@@ -263,20 +263,13 @@ fn innerMain() anyerror!void {
     _ = win32.showWindow(win, win32.SW_SHOWDEFAULT);
     try win32.updateWindow(win);
 
+    win32.dragAcceptFiles(win, true);
+
     // Handle command line
     {
         const args = win32.getArgs();
         defer win32.freeArgs(args);
-
-        if (args.len > 1) {
-            var path8: [max_path_size]u8 = undefined;
-            const path16 = args[1][0..std.mem.len(args[1])];
-            const len = try std.unicode.utf16leToUtf8(&path8, path16);
-            const file_name = path8[0..len];
-
-            try updateFiles(file_name);
-            try updateImage(win);
-        }
+        if (args.len > 1) try tryLoad(win, args[1][0..std.mem.len(args[1]) :0]);
     }
 
     // Main loop
@@ -346,6 +339,16 @@ fn processEvent(
 
             try updateImage(win);
         },
+        win32.WM_DROPFILES => {
+            const drop: win32.HDROP = @ptrFromInt(wparam);
+            defer win32.dragFinish(drop);
+
+            var buf: [4096]u16 = undefined;
+            const name = win32.dragQueryFile(drop, 0, &buf);
+            try tryLoad(win, name);
+
+            return true;
+        },
         else => return false,
     }
 
@@ -412,12 +415,11 @@ fn setTitle(win: win32.HWND, file_name: []const u8) !void {
 
     const title = buf.readableSlice(0)[0 .. buf.readableLength() - 1 :0];
 
-    if (win32.setWindowText(win, title) == 0) return error.Unexpected;
+    if (!win32.setWindowText(win, title)) return error.Unexpected;
 }
 
 fn open(win: win32.HWND) !void {
     var buf16 = [_]u16{0} ** max_path_size;
-    var buf8 = [_]u8{0} ** (2 * max_path_size);
 
     var ptr = @as([*:0]u16, @ptrCast(&buf16[0]));
     var ofn = win32.OPENFILENAMEW{
@@ -428,14 +430,21 @@ fn open(win: win32.HWND) !void {
     };
 
     if (try win32.getOpenFileName(&ofn)) {
-        // Wipe cache
-        images.clear();
+        images.clear(); // Wipe cache
+        try tryLoad(win, ptr[0..std.mem.len(ptr) :0]);
+    }
+}
 
-        const len = try std.unicode.utf16leToUtf8(&buf8, buf16[0..std.mem.len(ptr)]);
-        const file_name = buf8[0..len];
+fn tryLoad(win: win32.HWND, path16: [:0]const u16) !void {
+    var path8: [2 * max_path_size]u8 = undefined;
+    const len = try std.unicode.utf16leToUtf8(&path8, path16);
+    const file_name = path8[0..len];
 
+    if (isSupported(file_name)) {
         try updateFiles(file_name);
         try updateImage(win);
+    } else {
+        try messageBox(win, "File not supported: {s}", .{file_name});
     }
 }
 
@@ -455,7 +464,7 @@ fn updateImage(win: win32.HWND) !void {
         else => return err,
     };
 
-    if (win32.InvalidateRect(win, null, win32.TRUE) == 0) return error.Unexpected;
+    if (!win32.invalidateRect(win, null, true)) return error.Unexpected;
     try setTitle(win, file_name);
 
     // TODO (Matteo): Prefefetch asynchronously

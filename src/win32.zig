@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const win32 = std.os.windows;
+const assert = std.debug.assert;
 
 //=== Re-exports ===//
 
@@ -28,8 +29,8 @@ pub inline fn loadProc(comptime T: type, comptime name: [*:0]const u8, handle: w
 pub inline fn setWindowText(
     hwnd: win32.HWND,
     string: win32.LPCWSTR,
-) win32.BOOL {
-    return SetWindowTextW(hwnd, string);
+) bool {
+    return (SetWindowTextW(hwnd, string) != 0);
 }
 
 extern "user32" fn SetWindowTextW(
@@ -51,12 +52,26 @@ pub extern "user32" fn GetDpiForWindow(
     hwnd: win32.HWND,
 ) callconv(win32.WINAPI) c_uint;
 
-pub extern "user32" fn GetClientRect(
+pub inline fn getClientRect(win: win32.HWND) win32.RECT {
+    var rect: win32.RECT = undefined;
+    const result = GetClientRect(win, &rect);
+    assert(result != 0);
+    return rect;
+}
+
+extern "user32" fn GetClientRect(
     hwnd: win32.HWND,
     rect_ptr: *win32.RECT,
 ) callconv(win32.WINAPI) win32.BOOL;
 
-pub extern "user32" fn GetCursorPos(
+pub inline fn getCursorPos(win: win32.HWND) win32.POINT {
+    var point: win32.RECT = undefined;
+    const result = GetCursorPos(win, &point);
+    assert(result != 0);
+    return point;
+}
+
+extern "user32" fn GetCursorPos(
     out_point: *win32.POINT,
 ) callconv(win32.WINAPI) win32.BOOL;
 
@@ -81,17 +96,36 @@ pub extern "user32" fn KillTimer(
     event_id: isize,
 ) callconv(win32.WINAPI) win32.BOOL;
 
-pub extern "user32" fn ScreenToClient(
+pub inline fn pointToClient(win: win32.HWND, screen_point: win32.POINT) win32.POINT {
+    var client_point: win32.POINT = screen_point;
+    const result = ScreenToClient(win, &client_point);
+    assert(result);
+    return client_point;
+}
+
+pub inline fn pointToScreen(win: win32.HWND, client_point: win32.POINT) win32.POINT {
+    var screen_point: win32.POINT = client_point;
+    const result = ScreenToClient(win, &screen_point);
+    assert(result);
+    return screen_point;
+}
+
+extern "user32" fn ScreenToClient(
     hwnd: win32.HWND,
     point: *win32.POINT,
 ) callconv(win32.WINAPI) win32.BOOL;
 
-extern "user32" fn WaitMessage() callconv(win32.WINAPI) win32.BOOL;
+extern "user32" fn ClientToScreen(
+    hwnd: win32.HWND,
+    point: *win32.POINT,
+) callconv(win32.WINAPI) win32.BOOL;
 
 pub inline fn waitMessage() !void {
     const res = WaitMessage();
     if (res == 0) return error.Unexpected;
 }
+
+extern "user32" fn WaitMessage() callconv(win32.WINAPI) win32.BOOL;
 
 //=== Command line ===//
 
@@ -110,6 +144,50 @@ extern "shell32" fn CommandLineToArgvW(
     lpCmdLine: win32.LPCWSTR,
     pNumArgs: *c_int,
 ) callconv(win32.WINAPI) [*c]win32.LPWSTR;
+
+//=== Drag & Drop ===//
+
+pub const HDROP = *opaque {};
+
+pub inline fn dragAcceptFiles(win: win32.HWND, accept: bool) void {
+    DragAcceptFiles(win, @intFromBool(accept));
+}
+
+pub inline fn dragFinish(drop: HDROP) void {
+    DragFinish(drop);
+}
+
+pub inline fn dragQueryFileCount(drop: HDROP) c_uint {
+    return DragQueryFileW(drop, 0xFFFFFFFF, null, 0);
+}
+
+pub inline fn dragQueryFileLength(drop: HDROP, index: c_uint) c_uint {
+    return DragQueryFileW(drop, index, null, 0);
+}
+
+pub inline fn dragQueryFile(drop: HDROP, index: c_uint, buf: []u16) [:0]u16 {
+    const expected_len = dragQueryFileLength(drop, index);
+    assert(buf.len >= expected_len + 1);
+    const actual_len = DragQueryFileW(drop, index, @ptrCast(buf.ptr), @intCast(buf.len));
+    assert(expected_len == actual_len);
+    return buf[0..actual_len :0];
+}
+
+extern "shell32" fn DragAcceptFiles(
+    win: win32.HWND,
+    accept: win32.BOOL,
+) callconv(win32.WINAPI) void;
+
+extern "shell32" fn DragQueryFileW(
+    drop: HDROP,
+    file: c_uint,
+    lpszFile: ?[*:0]u16,
+    cch: c_uint,
+) callconv(win32.WINAPI) c_uint;
+
+extern "shell32" fn DragFinish(
+    drop: HDROP,
+) callconv(win32.WINAPI) void;
 
 //=== UTF16 string comparison ===//
 
@@ -356,7 +434,15 @@ pub const BufferedPaint = struct {
     }
 };
 
-pub extern "user32" fn InvalidateRect(
+pub inline fn invalidateRect(
+    win: win32.HWND,
+    opt_rect: ?*const win32.RECT,
+    erase: bool,
+) bool {
+    return (InvalidateRect(win, opt_rect, @intFromBool(erase)) != 0);
+}
+
+extern "user32" fn InvalidateRect(
     hWnd: win32.HWND,
     lpRect: ?*const win32.RECT,
     bErase: win32.BOOL,
@@ -458,7 +544,7 @@ pub const OPENFILENAMEW = extern struct {
 };
 
 pub inline fn getOpenFileName(ofn: *OPENFILENAMEW) Error!bool {
-    std.debug.assert(ofn.lStructSize == @sizeOf(OPENFILENAMEW));
+    assert(ofn.lStructSize == @sizeOf(OPENFILENAMEW));
 
     if (GetOpenFileNameW(ofn) == win32.TRUE) return true;
 
