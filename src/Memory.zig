@@ -5,6 +5,7 @@ const Memory = @This();
 const std = @import("std");
 const win32 = @import("win32.zig");
 const assert = std.debug.assert;
+const safety = std.debug.runtime_safety;
 
 const Allocator = std.mem.Allocator;
 
@@ -45,10 +46,11 @@ pub fn fromCommitted(buf: []u8) Memory {
 pub fn clear(self: *Memory) void {
     assert(self.scratch_stack == 0);
     self.alloc_pos = 0;
+    if (safety) self.decommitExcess();
 }
 
 pub fn decommitExcess(self: *Memory) void {
-    const min_commit = std.mem.alignForward(self.alloc_pos, std.mem.page_size);
+    const min_commit = std.mem.alignForward(usize, self.alloc_pos, std.mem.page_size);
 
     if (min_commit < self.commit_pos) {
         win32.VirtualFree(
@@ -130,6 +132,7 @@ fn resize(
     if (new_size <= buf.len) {
         const sub = buf.len - new_size;
         self.alloc_pos -= sub;
+        if (safety) self.decommitExcess();
         return true;
     }
 
@@ -152,8 +155,8 @@ fn free(
     _ = return_address;
 
     const self = selfCast(ptr);
-
     if (self.isLastAllocation(buf)) self.alloc_pos -= buf.len;
+    if (safety) self.decommitExcess();
 }
 
 /// Helper struct used to handle temporary (scratch) usage of volatile allocations
@@ -170,8 +173,8 @@ pub fn endScratch(self: *Memory, scope: ScratchScope) void {
     assert(scope.id == self.scratch_stack);
     assert(scope.id > 0);
     self.scratch_stack = scope.id - 1;
-    // TODO (Matteo): Decommit in debug builds?
     self.alloc_pos = scope.pos;
+    if (safety) self.decommitExcess();
 }
 
 fn commitVolatile(self: *Memory, target: usize) Error!void {
