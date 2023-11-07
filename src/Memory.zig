@@ -160,7 +160,7 @@ fn free(
 }
 
 /// Helper struct used to handle temporary (scratch) usage of volatile allocations
-const ScratchScope = struct { id: usize, pos: usize };
+pub const ScratchScope = struct { id: usize, pos: usize };
 
 /// Begin temporary allocation scope (save the stack pointer)
 pub fn beginScratch(self: *Memory) ScratchScope {
