@@ -356,8 +356,8 @@ pub inline fn beginPaint(win: win32.HWND, ps: *PAINTSTRUCT) Error!win32.HDC {
     return BeginPaint(win, ps) orelse error.Unexpected;
 }
 
-pub inline fn endPaint(win: win32.HWND, ps: *const PAINTSTRUCT) Error!void {
-    if (EndPaint(win, ps) != win32.TRUE) return error.Unexpected;
+pub inline fn endPaint(win: win32.HWND, ps: PAINTSTRUCT) Error!void {
+    if (EndPaint(win, &ps) != win32.TRUE) return error.Unexpected;
 }
 
 pub const BufferedPaint = struct {
@@ -414,7 +414,7 @@ pub const BufferedPaint = struct {
             return error.Unexpected;
         }
 
-        try endPaint(pb.win, &pb.ps);
+        try endPaint(pb.win, pb.ps);
     }
 
     pub const Area = union(enum) { All, Rect: win32.RECT };

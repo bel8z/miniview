@@ -269,7 +269,7 @@ fn innerMain() anyerror!void {
     {
         const args = win32.getArgs();
         defer win32.freeArgs(args);
-        if (args.len > 1) try tryLoad(win, args[1][0..std.mem.len(args[1]) :0]);
+        if (args.len > 1) try loadFile(win, args[1][0..std.mem.len(args[1]) :0]);
     }
 
     // Main loop
@@ -318,7 +318,7 @@ fn processEvent(
             // The background is not erased since the given brush is null
             assert(pb.ps.fErase == win32.TRUE);
 
-            try paint(pb);
+            try paint(pb.dc, pb.ps.rcPaint);
         },
         win32.WM_COMMAND => {
             if (wparam & 0xffff0000 == 0) {
@@ -345,7 +345,7 @@ fn processEvent(
 
             var buf: [4096]u16 = undefined;
             const name = win32.dragQueryFile(drop, 0, &buf);
-            try tryLoad(win, name);
+            try loadFile(win, name);
 
             return true;
         },
@@ -355,16 +355,16 @@ fn processEvent(
     return true;
 }
 
-fn paint(pb: win32.BufferedPaint) !void {
+fn paint(dc: win32.HDC, rect: win32.RECT) !void {
     var gfx: *gdip.Graphics = undefined;
-    try gdip.checkStatus(gdip.createFromHDC(pb.dc, &gfx));
+    try gdip.checkStatus(gdip.createFromHDC(dc, &gfx));
     defer gdip.checkStatus(gdip.deleteGraphics(gfx)) catch unreachable;
 
     try gdip.checkStatus(gdip.graphicsClear(gfx, 0xFFF0F0F0));
 
     if (curr_image) |bmp| {
         // Compute dimensions
-        const bounds = pb.ps.rcPaint;
+        const bounds = rect;
         const bounds_w = @as(f32, @floatFromInt(bounds.right - bounds.left));
         const bounds_h = @as(f32, @floatFromInt(bounds.bottom - bounds.top));
         var img_w: f32 = undefined;
@@ -396,7 +396,7 @@ fn paint(pb: win32.BufferedPaint) !void {
         ));
     }
 
-    if (builtin.mode == .Debug) debugInfo(pb);
+    if (builtin.mode == .Debug) debugInfo(dc);
 }
 
 /// Build title by composing app name and file path
@@ -431,21 +431,57 @@ fn open(win: win32.HWND) !void {
 
     if (try win32.getOpenFileName(&ofn)) {
         images.clear(); // Wipe cache
-        try tryLoad(win, ptr[0..std.mem.len(ptr) :0]);
+        try loadFile(win, ptr[0..std.mem.len(ptr) :0]);
     }
 }
 
-fn tryLoad(win: win32.HWND, path16: [:0]const u16) !void {
-    var path8: [2 * max_path_size]u8 = undefined;
-    const len = try std.unicode.utf16leToUtf8(&path8, path16);
-    const file_name = path8[0..len];
+fn loadFile(win: win32.HWND, wpath: [:0]const u16) !void {
+    var buf: [2 * max_path_size]u8 = undefined;
+    const len = try std.unicode.utf16leToUtf8(&buf, wpath);
+    const path = buf[0..len];
 
-    if (isSupported(file_name)) {
-        try updateFiles(file_name);
-        try updateImage(win);
-    } else {
-        try messageBox(win, "File not supported: {s}", .{file_name});
+    if (!isSupported(path)) {
+        try messageBox(win, "File not supported: {s}", .{path});
+        return;
     }
+
+    // Clear current list
+    files.clearRetainingCapacity();
+    curr_file = 0;
+    assert(main_mem.scratch_stack == 0);
+
+    // String storage is used only for the file list, so we can clear it as well
+    string_mem.clear();
+
+    // Split path in file and directory names
+    const sep = std.mem.lastIndexOfScalar(u8, path, '\\') orelse return error.InvalidPath;
+    const dirname = path[0 .. sep + 1];
+    const filename = path[sep + 1 ..];
+
+    // Iterate
+    var dir = try std.fs.openIterableDirAbsolute(dirname, .{});
+    defer dir.close();
+
+    var allocator = main_mem.allocator();
+    var iter = dir.iterate();
+    while (try iter.next()) |entry| {
+        if (entry.kind == .file and isSupported(entry.name)) {
+            // Push file to the list
+            var file = try files.addOne(allocator);
+
+            // Copy full path
+            file.* = .{ .name = try string_mem.alloc(u8, dirname.len + entry.name.len) };
+
+            std.mem.copy(u8, file.name[0..dirname.len], dirname);
+            std.mem.copy(u8, file.name[dirname.len..], entry.name);
+
+            // Update browse index
+            const index = files.items.len - 1;
+            if (std.mem.eql(u8, entry.name, filename)) curr_file = index;
+        }
+    }
+
+    try updateImage(win);
 }
 
 fn updateImage(win: win32.HWND) !void {
@@ -465,7 +501,7 @@ fn updateImage(win: win32.HWND) !void {
     };
 
     if (!win32.invalidateRect(win, null, true)) return error.Unexpected;
-    try setTitle(win, file_name);
+    // try setTitle(win, file_name);
 
     // TODO (Matteo): Prefefetch asynchronously
     if (prefetch) {
@@ -558,44 +594,6 @@ fn loadImageFile(file_name: []const u8) !*gdip.Image {
     return new_image;
 }
 
-fn updateFiles(path: []const u8) !void {
-    // Clear current list
-    files.clearRetainingCapacity();
-    curr_file = 0;
-    assert(main_mem.scratch_stack == 0);
-
-    // String storage is used only for the file list, so we can clear it as well
-    string_mem.clear();
-
-    // Split path in file and directory names
-    const sep = std.mem.lastIndexOfScalar(u8, path, '\\') orelse return error.InvalidPath;
-    const dirname = path[0 .. sep + 1];
-    const filename = path[sep + 1 ..];
-
-    // Iterate
-    var dir = try std.fs.openIterableDirAbsolute(dirname, .{});
-    defer dir.close();
-
-    var allocator = main_mem.allocator();
-    var iter = dir.iterate();
-    while (try iter.next()) |entry| {
-        if (entry.kind == .file and isSupported(entry.name)) {
-            // Push file to the list
-            var file = try files.addOne(allocator);
-
-            // Copy full path
-            file.* = .{ .name = try string_mem.alloc(u8, dirname.len + entry.name.len) };
-
-            std.mem.copy(u8, file.name[0..dirname.len], dirname);
-            std.mem.copy(u8, file.name[dirname.len..], entry.name);
-
-            // Update browse index
-            const index = files.items.len - 1;
-            if (std.mem.eql(u8, entry.name, filename)) curr_file = index;
-        }
-    }
-}
-
 fn isSupported(filename: []const u8) bool {
     const dot = std.mem.lastIndexOfScalar(u8, filename, '.') orelse return false;
     const ext = filename[dot..filename.len];
@@ -621,40 +619,40 @@ fn messageBox(win: ?win32.HWND, comptime fmt: []const u8, args: anytype) !void {
     _ = try win32.messageBoxW(win, out, app_name, 0);
 }
 
-fn debugInfo(pb: win32.BufferedPaint) void {
+fn debugInfo(dc: win32.HDC) void {
     var y: i32 = 0;
 
     const total_commit = main_mem.commit_pos + string_mem.commit_pos;
     const total_used = main_mem.alloc_pos + string_mem.alloc_pos;
 
-    y = debugText(pb, y, debug_buf, "Debug mode", .{});
-    y = debugText(pb, y, debug_buf, "# files: {}", .{files.items.len});
-    y = debugText(pb, y, debug_buf, "Memory usage", .{});
-    y = debugText(pb, y, debug_buf, "   Total: {}", .{total_commit});
-    y = debugText(pb, y, debug_buf, "      Committed: {}", .{total_commit});
-    y = debugText(pb, y, debug_buf, "      Used: {}", .{total_used});
-    y = debugText(pb, y, debug_buf, "      Waste: {}", .{total_commit - total_used});
-    y = debugText(pb, y, debug_buf, "   Main:", .{});
-    y = debugText(pb, y, debug_buf, "      Committed: {}", .{main_mem.commit_pos});
-    y = debugText(pb, y, debug_buf, "      Used: {}", .{main_mem.alloc_pos});
-    y = debugText(pb, y, debug_buf, "      Waste: {}", .{main_mem.commit_pos - main_mem.alloc_pos});
-    y = debugText(pb, y, debug_buf, "   String", .{});
-    y = debugText(pb, y, debug_buf, "      Committed: {}", .{string_mem.commit_pos});
-    y = debugText(pb, y, debug_buf, "      Used: {}", .{string_mem.alloc_pos});
-    y = debugText(pb, y, debug_buf, "      Waste: {}", .{string_mem.commit_pos - string_mem.alloc_pos});
+    y = debugText(dc, y, debug_buf, "Debug mode", .{});
+    y = debugText(dc, y, debug_buf, "# files: {}", .{files.items.len});
+    y = debugText(dc, y, debug_buf, "Memory usage", .{});
+    y = debugText(dc, y, debug_buf, "   Total: {}", .{total_commit});
+    y = debugText(dc, y, debug_buf, "      Committed: {}", .{total_commit});
+    y = debugText(dc, y, debug_buf, "      Used: {}", .{total_used});
+    y = debugText(dc, y, debug_buf, "      Waste: {}", .{total_commit - total_used});
+    y = debugText(dc, y, debug_buf, "   Main:", .{});
+    y = debugText(dc, y, debug_buf, "      Committed: {}", .{main_mem.commit_pos});
+    y = debugText(dc, y, debug_buf, "      Used: {}", .{main_mem.alloc_pos});
+    y = debugText(dc, y, debug_buf, "      Waste: {}", .{main_mem.commit_pos - main_mem.alloc_pos});
+    y = debugText(dc, y, debug_buf, "   String", .{});
+    y = debugText(dc, y, debug_buf, "      Committed: {}", .{string_mem.commit_pos});
+    y = debugText(dc, y, debug_buf, "      Used: {}", .{string_mem.alloc_pos});
+    y = debugText(dc, y, debug_buf, "      Waste: {}", .{string_mem.commit_pos - string_mem.alloc_pos});
 }
 
-fn debugText(pb: win32.BufferedPaint, y: i32, buf: []u8, comptime fmt: []const u8, args: anytype) i32 {
-    _ = win32.SetBkMode(pb.dc, .Transparent);
+fn debugText(dc: win32.HDC, y: i32, buf: []u8, comptime fmt: []const u8, args: anytype) i32 {
+    _ = win32.SetBkMode(dc, .Transparent);
 
     const text = formatWstr(buf, fmt, args) catch return y;
     const text_len = @as(c_int, @intCast(text.len));
 
     var cur_y = y + 1;
-    _ = win32.ExtTextOutW(pb.dc, 1, cur_y, 0, null, text.ptr, text_len, null);
+    _ = win32.ExtTextOutW(dc, 1, cur_y, 0, null, text.ptr, text_len, null);
 
     var size: win32.SIZE = undefined;
-    _ = win32.GetTextExtentPoint32W(pb.dc, text.ptr, text_len, &size);
+    _ = win32.GetTextExtentPoint32W(dc, text.ptr, text_len, &size);
     cur_y += size.cy;
 
     return cur_y;
