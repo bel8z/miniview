@@ -501,7 +501,7 @@ fn updateImage(win: win32.HWND) !void {
     };
 
     if (!win32.invalidateRect(win, null, true)) return error.Unexpected;
-    // try setTitle(win, file_name);
+    try setTitle(win, file_name);
 
     // TODO (Matteo): Prefefetch asynchronously
     if (prefetch) {
