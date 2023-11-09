@@ -515,6 +515,48 @@ pub extern "gdi32" fn GetTextExtentPoint32W(
     psizl: *SIZE,
 ) callconv(win32.WINAPI) c_int;
 
+pub extern "gdi32" fn DrawTextW(
+    hdc: win32.HDC,
+    lpchText: ?win32.LPCWSTR,
+    cchText: c_int,
+    lprc: *win32.RECT,
+    format: c_uint,
+) c_int;
+
+pub extern "gdi32" fn DrawTextExW(
+    hdc: win32.HDC,
+    lpchText: win32.LPCWSTR,
+    cchText: c_int,
+    lprc: *win32.RECT,
+    format: c_uint,
+    lpdtp: *DRAWTEXTPARAMS,
+) c_int;
+
+pub const DRAWTEXTPARAMS = struct {
+    cbSize: c_uint = @sizeOf(DRAWTEXTPARAMS),
+    iTabLength: c_int = 8,
+    iLeftMargin: c_int = 0,
+    iRightMargin: c_int = 0,
+    uiLengthDrawn: c_uint = 0,
+};
+
+// DrawText Format Flags
+pub const DT_TOP = 0x00000000;
+pub const DT_LEFT = 0x00000000;
+pub const DT_CENTER = 0x00000001;
+pub const DT_RIGHT = 0x00000002;
+pub const DT_VCENTER = 0x00000004;
+pub const DT_BOTTOM = 0x00000008;
+pub const DT_WORDBREAK = 0x00000010;
+pub const DT_SINGLELINE = 0x00000020;
+pub const DT_EXPANDTABS = 0x00000040;
+pub const DT_TABSTOP = 0x00000080;
+pub const DT_NOCLIP = 0x00000100;
+pub const DT_EXTERNALLEADING = 0x00000200;
+pub const DT_CALCRECT = 0x00000400;
+pub const DT_NOPREFIX = 0x00000800;
+pub const DT_INTERNAL = 0x00001000;
+
 //=== File dialogs ===//
 
 pub const OPENFILENAMEW = extern struct {
@@ -562,6 +604,10 @@ extern "comdlg32" fn CommDlgExtendedError() callconv(win32.WINAPI) u32;
 
 pub const IStream = extern struct {
     lpVtbl: [*c]Vtbl,
+
+    pub fn release(stream: *IStream) u32 {
+        return stream.lpVtbl.*.Release(stream);
+    }
 
     const Vtbl = extern struct {
         QueryInterface: *const fn (

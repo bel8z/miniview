@@ -39,6 +39,12 @@ const extensions = init: {
     break :init temp;
 };
 
+// TODO (Matteo): 1GB should be enough, right? Mind that on x86 Windows the
+// available address space should be 2GB, but reserving that much failed...
+const reserved_bytes: usize = 1024 << 20;
+const cache_bytes: usize = 64 << 20;
+const cache_size: ImageCache.Int = 16;
+
 // TODO (Matteo): Prefefetch asynchronously
 const prefetch = false;
 
@@ -71,17 +77,16 @@ const ImageCache = struct {
 
     const Node = struct { gen: Int = 0, val: Image = .None };
     const Self = @This();
-    const size: Int = 16;
 
     comptime {
-        assert(std.math.isPowerOfTwo(size));
+        assert(std.math.isPowerOfTwo(cache_size));
     }
 
-    nodes: [size]Node = [_]Node{.{}} ** size,
+    nodes: [cache_size]Node = [_]Node{.{}} ** cache_size,
     count: Int = 0,
 
     pub fn new(self: *Self) Handle {
-        const idx = @atomicRmw(Int, &self.count, .Add, 1, .SeqCst) & (size - 1);
+        const idx = @atomicRmw(Int, &self.count, .Add, 1, .SeqCst) & (cache_size - 1);
 
         var node = &self.nodes[idx];
 
@@ -182,7 +187,8 @@ pub fn panic(err: []const u8, maybe_trace: ?*std.builtin.StackTrace, ret_addr: ?
 }
 
 var main_mem: Memory = undefined;
-var string_mem: Memory = undefined;
+var cache_mem: Memory = undefined;
+var string_table: std.ArrayList(u8) = undefined;
 
 var images: *ImageCache = undefined;
 var files = std.ArrayListUnmanaged(FileInfo){};
@@ -195,15 +201,19 @@ var debug_buf: []u8 = &[_]u8{};
 
 fn innerMain() anyerror!void {
     // Init memory block
-    // TODO (Matteo): 1GB should be enough, right? Mind that on x86 Windows the
-    // available address space should be 2GB, but reserving that much failed...
-    const reserved = try Memory.rawReserve(1024 * 1024 * 1024);
-    main_mem = Memory.fromReserved(reserved[0 .. reserved.len / 2]);
-    string_mem = Memory.fromReserved(reserved[reserved.len / 2 ..]);
+    var reserved_buf = try Memory.rawReserve(reserved_bytes);
+    const cache_buf = reserved_buf[0..cache_bytes];
+    reserved_buf = reserved_buf[cache_buf.len..];
+
+    cache_mem = Memory.fromReserved(cache_buf);
+    main_mem = Memory.fromReserved(reserved_buf[0 .. reserved_buf.len / 2]);
+
+    var string_mem_inst = Memory.fromReserved(reserved_buf[reserved_buf.len / 2 ..]);
+    string_table = std.ArrayList(u8).init(string_mem_inst.allocator());
 
     // Allocate persistent data
     if (builtin.mode == .Debug) debug_buf = try main_mem.alloc(u8, 4096);
-    images = try main_mem.allocOne(ImageCache);
+    images = try main_mem.create(ImageCache);
     images.* = .{};
 
     // Create IO completion port for async file reading
@@ -235,6 +245,7 @@ fn innerMain() anyerror!void {
 
     // Init GDI+
     try gdip.init();
+    defer gdip.deinit();
 
     // Create window
     const menu = try win32.createMenu();
@@ -401,12 +412,11 @@ fn paint(dc: win32.HDC, rect: win32.RECT) !void {
 
 /// Build title by composing app name and file path
 fn setTitle(win: win32.HWND, file_name: []const u8) !void {
-    const scratch = main_mem.beginScratch();
-    defer main_mem.endScratch(scratch);
-
     const buf_size = app_name.len + file_name.len + 16;
 
     var buf = RingBuffer(u16).init(try main_mem.alloc(u16, buf_size));
+    defer main_mem.free(buf.buf);
+
     try buf.write(app_name);
     try buf.write(L(" - "));
     const len = try std.unicode.utf8ToUtf16Le(buf.writableSlice(0), file_name);
@@ -448,10 +458,9 @@ fn loadFile(win: win32.HWND, wpath: [:0]const u16) !void {
     // Clear current list
     files.clearRetainingCapacity();
     curr_file = 0;
-    assert(main_mem.scratch_stack == 0);
 
     // String storage is used only for the file list, so we can clear it as well
-    string_mem.clear();
+    string_table.clearAndFree();
 
     // Split path in file and directory names
     const sep = std.mem.lastIndexOfScalar(u8, path, '\\') orelse return error.InvalidPath;
@@ -470,7 +479,7 @@ fn loadFile(win: win32.HWND, wpath: [:0]const u16) !void {
             var file = try files.addOne(allocator);
 
             // Copy full path
-            file.* = .{ .name = try string_mem.alloc(u8, dirname.len + entry.name.len) };
+            file.* = .{ .name = try string_table.addManyAsSlice(dirname.len + entry.name.len) };
 
             std.mem.copy(u8, file.name[0..dirname.len], dirname);
             std.mem.copy(u8, file.name[dirname.len..], entry.name);
@@ -550,10 +559,9 @@ fn loadImageFile(file_name: []const u8) !*gdip.Image {
     defer win32.CloseHandle(file);
 
     // Read all file in a temporary block
-    const scratch = main_mem.beginScratch();
-    defer main_mem.endScratch(scratch);
     const size = @as(usize, @intCast(try win32.GetFileSizeEx(file)));
-    const block = try main_mem.alloc(u8, size);
+    const block = try cache_mem.alloc(u8, size);
+    defer cache_mem.free(block);
 
     // Emulate asyncronous read
     var ovp_in = std.mem.zeroInit(win32.OVERLAPPED, .{});
@@ -584,11 +592,14 @@ fn loadImageFile(file_name: []const u8) !*gdip.Image {
     }
     assert(bytes == size);
 
+    // TODO (Matteo): Get rid of this nonsense! This seems to make a copy of the
+    // given buffer, because memory leaks if the stream is not released.
+    // I honestly expected this to behave as a wrapper.
+    const stream = try win32.createMemStream(block);
+    defer _ = stream.release();
+
     var new_image: *gdip.Image = undefined;
-    const status = gdip.createImageFromStream(
-        try win32.createMemStream(block),
-        &new_image,
-    );
+    const status = gdip.createImageFromStream(stream, &new_image);
     try gdip.checkStatus(status);
 
     return new_image;
@@ -611,35 +622,39 @@ fn isSupported(filename: []const u8) bool {
 }
 
 fn messageBox(win: ?win32.HWND, comptime fmt: []const u8, args: anytype) !void {
-    const scratch = main_mem.beginScratch();
-    defer main_mem.endScratch(scratch);
     var buf = try main_mem.alloc(u8, 4096);
+    defer main_mem.free(buf);
 
     const out = try formatWstr(buf, fmt, args);
     _ = try win32.messageBoxW(win, out, app_name, 0);
 }
 
 fn debugInfo(dc: win32.HDC) void {
+    var string_mem = Memory.cast(string_table.allocator.ptr);
+
     var y: i32 = 0;
 
-    const total_commit = main_mem.commit_pos + string_mem.commit_pos;
-    const total_used = main_mem.alloc_pos + string_mem.alloc_pos;
+    const total_commit = main_mem.commit_pos + string_mem.commit_pos + cache_mem.commit_pos;
+    const total_used = main_mem.alloc_pos + string_mem.alloc_pos + cache_mem.alloc_pos;
 
-    y = debugText(dc, y, debug_buf, "Debug mode", .{});
-    y = debugText(dc, y, debug_buf, "# files: {}", .{files.items.len});
+    y = debugText(dc, y, debug_buf, "Debug mode\n# files: {}", .{files.items.len});
     y = debugText(dc, y, debug_buf, "Memory usage", .{});
-    y = debugText(dc, y, debug_buf, "   Total: {}", .{total_commit});
-    y = debugText(dc, y, debug_buf, "      Committed: {}", .{total_commit});
-    y = debugText(dc, y, debug_buf, "      Used: {}", .{total_used});
-    y = debugText(dc, y, debug_buf, "      Waste: {}", .{total_commit - total_used});
-    y = debugText(dc, y, debug_buf, "   Main:", .{});
-    y = debugText(dc, y, debug_buf, "      Committed: {}", .{main_mem.commit_pos});
-    y = debugText(dc, y, debug_buf, "      Used: {}", .{main_mem.alloc_pos});
-    y = debugText(dc, y, debug_buf, "      Waste: {}", .{main_mem.commit_pos - main_mem.alloc_pos});
-    y = debugText(dc, y, debug_buf, "   String", .{});
-    y = debugText(dc, y, debug_buf, "      Committed: {}", .{string_mem.commit_pos});
-    y = debugText(dc, y, debug_buf, "      Used: {}", .{string_mem.alloc_pos});
-    y = debugText(dc, y, debug_buf, "      Waste: {}", .{string_mem.commit_pos - string_mem.alloc_pos});
+
+    y = debugText(dc, y, debug_buf, //
+        "\tTotal: \n\t\tCommitted: {}\n\t\tUsed: {}\n\t\tWaste: {}", //
+        .{ total_commit, total_used, total_commit - total_used });
+
+    y = debugText(dc, y, debug_buf, //
+        "\tMain:  \n\t\tCommitted: {}\n\t\tUsed: {}\n\t\tWaste: {}", //
+        .{ main_mem.commit_pos, main_mem.alloc_pos, main_mem.commit_pos - main_mem.alloc_pos });
+
+    y = debugText(dc, y, debug_buf, //
+        "\tCache: \n\t\tCommitted: {}\n\t\tUsed: {}\n\t\tWaste: {}", //
+        .{ cache_mem.commit_pos, cache_mem.alloc_pos, cache_mem.commit_pos - cache_mem.alloc_pos });
+
+    y = debugText(dc, y, debug_buf, //
+        "\tString:\n\t\tCommitted: {}\n\t\tUsed: {}\n\t\tWaste: {}", //
+        .{ string_mem.commit_pos, string_mem.alloc_pos, string_mem.commit_pos - string_mem.alloc_pos });
 }
 
 fn debugText(dc: win32.HDC, y: i32, buf: []u8, comptime fmt: []const u8, args: anytype) i32 {
@@ -647,14 +662,23 @@ fn debugText(dc: win32.HDC, y: i32, buf: []u8, comptime fmt: []const u8, args: a
 
     const text = formatWstr(buf, fmt, args) catch return y;
     const text_len = @as(c_int, @intCast(text.len));
+    const flags = win32.DT_TOP | win32.DT_LEFT | win32.DT_EXPANDTABS;
+    const tabs = win32.DT_TABSTOP | 0x300;
 
     var cur_y = y + 1;
-    _ = win32.ExtTextOutW(dc, 1, cur_y, 0, null, text.ptr, text_len, null);
+    var bounds = win32.RECT{
+        .left = 1,
+        .top = cur_y,
+        .right = 0,
+        .bottom = 0,
+    };
 
-    var size: win32.SIZE = undefined;
-    _ = win32.GetTextExtentPoint32W(dc, text.ptr, text_len, &size);
-    cur_y += size.cy;
+    var ofst: c_int = 0;
+    ofst = win32.DrawTextW(dc, text, text_len, &bounds, tabs);
+    ofst = win32.DrawTextW(dc, text, text_len, &bounds, flags | win32.DT_CALCRECT);
+    ofst = win32.DrawTextW(dc, text, text_len, &bounds, flags | tabs);
 
+    cur_y += ofst;
     return cur_y;
 }
 

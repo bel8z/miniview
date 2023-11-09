@@ -61,6 +61,10 @@ const GdiplusStartup = *const fn (
     output: *GdiplusStartupOutput,
 ) callconv(WINGDIPAPI) Status;
 
+const GdiplusShutdown = *const fn (
+    token: win32.ULONG_PTR,
+) callconv(WINGDIPAPI) void;
+
 const GdipCreateBitmapFromStream = *const fn (
     stream: *win32.IStream,
     image: **Image,
@@ -98,6 +102,7 @@ const GdipSetInterpolationMode = *const fn (
 
 var dll: win32.HMODULE = undefined;
 var token: win32.ULONG_PTR = 0;
+var shutdown: GdiplusShutdown = undefined;
 
 pub var createImageFromStream: GdipCreateBitmapFromStream = undefined;
 pub var disposeImage: GdipDisposeImage = undefined;
@@ -118,12 +123,17 @@ pub fn init() Error!void {
     graphicsClear = try win32.loadProc(GdipGraphicsClear, "GdipGraphicsClear", dll);
     drawImageRect = try win32.loadProc(GdipDrawImageRect, "GdipDrawImageRect", dll);
     setInterpolationMode = try win32.loadProc(GdipSetInterpolationMode, "GdipSetInterpolationMode", dll);
+    shutdown = try win32.loadProc(GdiplusShutdown, "GdiplusShutdown", dll);
 
     const startup = try win32.loadProc(GdiplusStartup, "GdiplusStartup", dll);
     const input = GdiplusStartupInput{};
     var output: GdiplusStartupOutput = undefined;
     const status = startup(&token, &input, &output);
     try checkStatus(status);
+}
+
+pub fn deinit() void {
+    shutdown(token);
 }
 
 pub inline fn checkStatus(status: Status) Error!void {
