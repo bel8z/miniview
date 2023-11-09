@@ -18,7 +18,7 @@ alloc_pos: usize = 0,
 commit_pos: usize = 0,
 scratch_stack: usize = 0,
 
-pub fn rawReserve(capacity: usize) win32.VirtualAllocError![]u8 {
+pub inline fn rawReserve(capacity: usize) win32.VirtualAllocError![]u8 {
     const bytes = @as([*]u8, @ptrCast(try win32.VirtualAlloc(
         null,
         capacity,
@@ -29,6 +29,20 @@ pub fn rawReserve(capacity: usize) win32.VirtualAllocError![]u8 {
     assert(std.mem.isAligned(@intFromPtr(bytes.ptr), std.mem.page_size));
 
     return bytes;
+}
+
+pub inline fn rawCommit(buf: []u8) win32.VirtualAllocError!void {
+    const src = @as(win32.LPVOID, @ptrCast(buf.ptr));
+    const dst = try win32.VirtualAlloc(src, buf.len, win32.MEM_COMMIT, win32.PAGE_READWRITE);
+    assert(src == dst);
+}
+
+pub inline fn rawDecommit(buf: []u8) void {
+    win32.VirtualFree(@as(win32.LPVOID, @ptrCast(buf.ptr)), buf.len, win32.MEM_DECOMMIT);
+}
+
+pub inline fn rawRelease(buf: []u8) void {
+    win32.VirtualFree(@as(win32.LPVOID, @ptrCast(buf.ptr)), buf.len, win32.MEM_RELEASE);
 }
 
 pub fn reserve(capacity: usize) win32.VirtualAllocError!Memory {
@@ -50,26 +64,32 @@ pub fn clear(self: *Memory) void {
 }
 
 pub fn decommitExcess(self: *Memory) void {
-    const min_commit = std.mem.alignForward(usize, self.alloc_pos, std.mem.page_size);
+    const done = self.adjustCommitted(self.alloc_pos);
+    assert(done);
+}
 
-    if (min_commit < self.commit_pos) {
-        win32.VirtualFree(
-            @as(win32.LPVOID, @ptrCast(self.bytes.ptr + min_commit)),
-            self.commit_pos - min_commit,
-            win32.MEM_DECOMMIT,
-        );
+fn adjustCommitted(self: *Memory, target: usize) bool {
+    const min_commit = std.mem.alignForward(usize, target, std.mem.page_size);
 
-        self.commit_pos = min_commit;
+    if (min_commit > self.commit_pos) {
+        const buf = self.bytes[self.commit_pos..min_commit];
+        rawCommit(buf) catch return false;
+    } else if (min_commit < self.commit_pos) {
+        const buf = self.bytes[min_commit..self.commit_pos];
+        rawDecommit(buf);
     }
+
+    self.commit_pos = min_commit;
+    return true;
 }
 
 pub inline fn allocator(self: *Memory) Allocator {
     return .{
         .ptr = self,
         .vtable = &.{
-            .alloc = allocAlign,
-            .resize = resize,
-            .free = free,
+            .alloc = allocImpl,
+            .resize = resizeImpl,
+            .free = freeImpl,
         },
     };
 }
@@ -91,42 +111,27 @@ inline fn selfCast(ptr: *anyopaque) *Memory {
 }
 
 fn allocAlign(
-    ptr: *anyopaque,
+    self: *Memory,
     size: usize,
-    ptr_align_log2: u8,
-    return_address: usize,
+    ptr_align: usize,
 ) ?[*]u8 {
-    _ = return_address;
-
-    const self = selfCast(ptr);
-    const ptr_align = @as(usize, 1) << @as(Allocator.Log2Align, @intCast(ptr_align_log2));
-
     if (std.mem.alignPointerOffset(self.bytes.ptr + self.alloc_pos, ptr_align)) |offset| {
         const mem_start = self.alloc_pos + offset;
         const mem_end = mem_start + size;
-        if (mem_end <= self.bytes.len) {
-            if (self.commitVolatile(mem_end)) {
-                self.alloc_pos = mem_end;
-                return self.bytes.ptr + mem_start;
-            } else |_| {}
+        if (mem_end <= self.bytes.len and self.adjustCommitted(mem_end)) {
+            self.alloc_pos = mem_end;
+            return self.bytes.ptr + mem_start;
         }
     }
 
     return null;
 }
 
-fn resize(
-    ptr: *anyopaque,
-    buf: []u8,
-    ptr_align_log2: u8,
-    new_size: usize,
-    return_address: usize,
-) bool {
-    _ = ptr_align_log2;
-    _ = return_address;
+inline fn free(self: *Memory, buf: []u8) bool {
+    return self.resize(buf, 0);
+}
 
-    const self = selfCast(ptr);
-
+fn resize(self: *Memory, buf: []u8, new_size: usize) bool {
     if (!self.isLastAllocation(buf)) return (new_size <= buf.len);
 
     if (new_size <= buf.len) {
@@ -136,16 +141,39 @@ fn resize(
         return true;
     }
 
-    const add = new_size - buf.len;
-    const next_pos = self.alloc_pos + add;
-    if (next_pos > self.bytes.len) return false;
-    self.commitVolatile(next_pos) catch return false;
+    const next_pos = self.alloc_pos + new_size - buf.len;
+    if (next_pos <= self.bytes.len and self.adjustCommitted(next_pos)) {
+        self.alloc_pos = next_pos;
+        return true;
+    }
 
-    self.alloc_pos = next_pos;
-    return true;
+    return false;
 }
 
-fn free(
+fn allocImpl(
+    ptr: *anyopaque,
+    size: usize,
+    ptr_align_log2: u8,
+    return_address: usize,
+) ?[*]u8 {
+    _ = return_address;
+    const ptr_align = @as(usize, 1) << @as(Allocator.Log2Align, @intCast(ptr_align_log2));
+    return selfCast(ptr).allocAlign(size, ptr_align);
+}
+
+fn resizeImpl(
+    ptr: *anyopaque,
+    buf: []u8,
+    ptr_align_log2: u8,
+    new_size: usize,
+    return_address: usize,
+) bool {
+    _ = ptr_align_log2;
+    _ = return_address;
+    return selfCast(ptr).resize(buf, new_size);
+}
+
+fn freeImpl(
     ptr: *anyopaque,
     buf: []u8,
     ptr_align_log2: u8,
@@ -153,10 +181,7 @@ fn free(
 ) void {
     _ = ptr_align_log2;
     _ = return_address;
-
-    const self = selfCast(ptr);
-    if (self.isLastAllocation(buf)) self.alloc_pos -= buf.len;
-    if (safety) self.decommitExcess();
+    _ = selfCast(ptr).free(buf);
 }
 
 /// Helper struct used to handle temporary (scratch) usage of volatile allocations
@@ -175,19 +200,4 @@ pub fn endScratch(self: *Memory, scope: ScratchScope) void {
     self.scratch_stack = scope.id - 1;
     self.alloc_pos = scope.pos;
     if (safety) self.decommitExcess();
-}
-
-fn commitVolatile(self: *Memory, target: usize) Error!void {
-    const min_commit = std.mem.alignForward(usize, target, std.mem.page_size);
-
-    if (min_commit > self.commit_pos) {
-        _ = win32.VirtualAlloc(
-            @as(win32.LPVOID, @ptrCast(self.bytes.ptr + self.commit_pos)),
-            min_commit - self.commit_pos,
-            win32.MEM_COMMIT,
-            win32.PAGE_READWRITE,
-        ) catch return error.OutOfMemory;
-
-        self.commit_pos = min_commit;
-    }
 }
