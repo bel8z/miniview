@@ -9,9 +9,8 @@ const Memory = @import("Memory.zig");
 const L = win32.L;
 
 // TODO (Matteo):
-// - Implement image cache
-// - Implement async loading
-// - Cleanup string management (UTF8 <=> UTF16)
+// - Cleanup string management (UTF8 <=> UTF16) ... in progress
+// - Review image storage with async loading
 // - Cleanup memory management
 // - Cleanup panic handling and error reporting in general
 
@@ -440,6 +439,7 @@ fn setTitle(win: win32.HWND, file_name: [:0]const u16) !void {
     if (!win32.setWindowText(win, title)) return error.Unexpected;
 }
 
+/// Open an image file via modal dialog
 fn open(win: win32.HWND) !void {
     var buf = try tempAlloc(u16, win32.PATH_MAX_WIDE);
     defer tempFree(buf);
@@ -451,7 +451,7 @@ fn open(win: win32.HWND) !void {
         .hwndOwner = win,
         .lpstrFile = ptr,
         .nMaxFile = @as(u32, @intCast(buf.len)),
-        .lpstrFilter = L("Image files\x00") ++ filter ++ L("\x00"),
+        .lpstrFilter = L("Image files\x00") ++ L(filter) ++ L("\x00"),
     };
 
     if (try win32.getOpenFileName(&ofn)) {
@@ -471,9 +471,10 @@ fn open(win: win32.HWND) !void {
     }
 }
 
+/// Load an image file from explicit path
 fn loadFile(win: win32.HWND, wpath: [:0]const u16) !void {
     if (!isSupportedW(wpath)) {
-        try invalidFileMsg(win, wpath);
+        try showNotSupported(win, wpath);
         return;
     }
 
@@ -487,6 +488,7 @@ fn loadFile(win: win32.HWND, wpath: [:0]const u16) !void {
     try loadDirectory(win, path.buf[0..path.len :0], wpath[path.len.. :0]);
 }
 
+/// Load the image file paths for the given directory. Browsing starts at the given file.
 fn loadDirectory(win: win32.HWND, dirname: [:0]const u16, filename: [:0]const u16) !void {
     // Clear current list
     files.clearRetainingCapacity();
@@ -520,6 +522,7 @@ fn loadDirectory(win: win32.HWND, dirname: [:0]const u16, filename: [:0]const u1
     try updateImage(win);
 }
 
+/// Open the given directory for iteration
 fn openIterableDir(dirname: [:0]const u16) !std.fs.IterableDir {
     // TODO (Matteo): Get rid of this nonsense!
     // std.fs.openIterableDirAbsoluteW is broken, at least for network paths,
@@ -531,16 +534,7 @@ fn openIterableDir(dirname: [:0]const u16) !std.fs.IterableDir {
     return std.fs.openIterableDirAbsolute(buf[0..len], .{});
 }
 
-fn getFullPath(file: *const FileInfo) [:0]const u16 {
-    const total = path.len + file.path.len;
-    assert(total < path.buf.len);
-
-    std.mem.copy(u16, path.buf[path.len..], file.name());
-    path.buf[total] = 0;
-
-    return path.buf[0..total :0];
-}
-
+/// Update image to display
 fn updateImage(win: win32.HWND) !void {
     const file_count = files.items.len;
     if (file_count == 0) return;
@@ -551,7 +545,7 @@ fn updateImage(win: win32.HWND) !void {
 
     curr_image = loadInCache(curr_file) catch |err| switch (err) {
         error.InvalidParameter => {
-            try invalidFileMsg(win, file_name);
+            try showNotSupported(win, file_name);
             return;
         },
         else => return err,
@@ -569,6 +563,19 @@ fn updateImage(win: win32.HWND) !void {
     }
 }
 
+/// Get the fully qualified path for the given file; assumes the file is located
+/// in the currently loaded directory.
+fn getFullPath(file: *const FileInfo) [:0]const u16 {
+    const total = path.len + file.path.len;
+    assert(total < path.buf.len);
+
+    std.mem.copy(u16, path.buf[path.len..], file.name());
+    path.buf[total] = 0;
+
+    return path.buf[0..total :0];
+}
+
+// TODO (Matteo): Review image storage
 fn loadInCache(index: usize) !*gdip.Image {
     const file = &files.items[index];
 
@@ -590,6 +597,7 @@ fn loadInCache(index: usize) !*gdip.Image {
     }
 }
 
+// TODO (Matteo): Review image storage
 fn loadImageFile(file_name: [:0]const u16) !*gdip.Image {
     const wide_path = try win32.wToPrefixedFileW(file_name);
 
@@ -653,6 +661,8 @@ fn loadImageFile(file_name: [:0]const u16) !*gdip.Image {
     return new_image;
 }
 
+/// Check if the given file name has a supported image format, based on the extension
+/// Variant for utf16 "wide" strings
 fn isSupportedW(filename: [:0]const u16) bool {
     var buf: [256]u8 = undefined;
     const dot = std.mem.lastIndexOfScalar(u16, filename, '.') orelse return false;
@@ -660,11 +670,14 @@ fn isSupportedW(filename: [:0]const u16) bool {
     return isSupportedExt(buf[0..len]);
 }
 
+/// Check if the given file name has a supported image format, based on the extension
+/// Variant for standard utf8 strings
 fn isSupported(filename: []const u8) bool {
     const dot = std.mem.lastIndexOfScalar(u8, filename, '.') orelse return false;
     return isSupportedExt(filename[dot..]);
 }
 
+/// Check if the given file extension identifies a supported image file format
 fn isSupportedExt(ext: []const u8) bool {
     if (ext.len == 0) return false;
 
@@ -676,6 +689,36 @@ fn isSupportedExt(ext: []const u8) bool {
     return false;
 }
 
+/// Display a message box indicating that the given file is not supported
+fn showNotSupported(win: ?win32.HWND, file_path: [:0]const u16) !void {
+    var buf = try tempAlloc(u8, 2 * std.fs.MAX_PATH_BYTES);
+    defer tempFree(buf);
+
+    var len = try std.unicode.utf16leToUtf8(buf, file_path);
+    const out = try bufPrintW(buf[len..], "Invalid image file: {s}", .{buf[0..len]});
+    _ = try win32.messageBoxW(win, out, app_name, 0);
+}
+
+/// Format message to a utf16 "wide" string
+fn bufPrintW(buf: []u8, comptime fmt: []const u8, args: anytype) ![:0]const u16 {
+    const str = try std.fmt.bufPrint(buf, fmt, args);
+    var alloc = std.heap.FixedBufferAllocator.init(buf[str.len..]);
+    return std.unicode.utf8ToUtf16LeWithNull(alloc.allocator(), str);
+}
+
+/// Allocate memory from the temporary storage
+fn tempAlloc(comptime T: type, size: usize) Memory.Error![]T {
+    return temp_mem.alloc(T, size);
+}
+
+/// Free memory allocated from the temporary storage.
+/// Assert that the allocation is the last one (basic leakage check)
+fn tempFree(slice: anytype) void {
+    assert(temp_mem.isLastAllocation(std.mem.sliceAsBytes(slice)));
+    temp_mem.free(slice);
+}
+
+/// Write debug information on the given surface (DC)
 fn debugInfo(dc: win32.HDC) void {
     var y: i32 = 0;
 
@@ -705,7 +748,7 @@ fn debugInfo(dc: win32.HDC) void {
 fn debugText(dc: win32.HDC, y: i32, comptime fmt: []const u8, args: anytype) i32 {
     _ = win32.SetBkMode(dc, .Transparent);
 
-    const text = formatWstr(debug_buf, fmt, args) catch return y;
+    const text = bufPrintW(debug_buf, fmt, args) catch return y;
     const text_len = @as(c_int, @intCast(text.len));
     const flags = win32.DT_TOP | win32.DT_LEFT | win32.DT_EXPANDTABS;
     const tabs = win32.DT_TABSTOP | 0x300;
@@ -725,29 +768,4 @@ fn debugText(dc: win32.HDC, y: i32, comptime fmt: []const u8, args: anytype) i32
 
     cur_y += ofst;
     return cur_y;
-}
-
-fn invalidFileMsg(win: ?win32.HWND, file_path: [:0]const u16) !void {
-    var buf = try tempAlloc(u8, 2 * std.fs.MAX_PATH_BYTES);
-    defer tempFree(buf);
-
-    var len = try std.unicode.utf16leToUtf8(buf, file_path);
-    const out = try formatWstr(buf[len..], "Invalid image file: {s}", .{buf[0..len]});
-    _ = try win32.messageBoxW(win, out, app_name, 0);
-}
-
-fn formatWstr(buf: []u8, comptime fmt: []const u8, args: anytype) ![:0]const u16 {
-    const str = try std.fmt.bufPrint(buf, fmt, args);
-
-    var alloc = std.heap.FixedBufferAllocator.init(buf[str.len..]);
-    return std.unicode.utf8ToUtf16LeWithNull(alloc.allocator(), str);
-}
-
-fn tempAlloc(comptime T: type, size: usize) Memory.Error![]T {
-    return temp_mem.alloc(T, size);
-}
-
-fn tempFree(slice: anytype) void {
-    assert(temp_mem.isLastAllocation(std.mem.sliceAsBytes(slice)));
-    temp_mem.free(slice);
 }
