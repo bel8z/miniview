@@ -366,11 +366,20 @@ fn processEvent(
             const drop: win32.HDROP = @ptrFromInt(wparam);
             defer win32.dragFinish(drop);
 
-            var buf = try tempAlloc(u16, win32.PATH_MAX_WIDE);
-            defer tempFree(buf);
+            if (win32.dragQueryFileCount(drop) == 1) {
+                var buf = try tempAlloc(u16, win32.PATH_MAX_WIDE);
+                defer tempFree(buf);
 
-            const name = win32.dragQueryFile(drop, 0, buf);
-            try loadFile(win, name);
+                const name = win32.dragQueryFile(drop, 0, buf);
+                try loadFile(win, name);
+            } else {
+                _ = try win32.messageBoxW(
+                    win,
+                    L("Dropping multiple files is not supported"),
+                    app_name,
+                    0,
+                );
+            }
 
             return true;
         },
@@ -694,8 +703,7 @@ fn showNotSupported(win: ?win32.HWND, file_path: [:0]const u16) !void {
     var buf = try tempAlloc(u8, 2 * std.fs.MAX_PATH_BYTES);
     defer tempFree(buf);
 
-    var len = try std.unicode.utf16leToUtf8(buf, file_path);
-    const out = try bufPrintW(buf[len..], "Invalid image file: {s}", .{buf[0..len]});
+    const out = try bufPrintW(buf, "File not supported:\n{s}", .{std.unicode.fmtUtf16le(file_path)});
     _ = try win32.messageBoxW(win, out, app_name, 0);
 }
 
@@ -741,7 +749,7 @@ fn debugInfo(dc: win32.HDC) void {
         .{ cache_mem.commit_pos, cache_mem.alloc_pos, cache_mem.commit_pos - cache_mem.alloc_pos });
 
     y = debugText(dc, y, //
-        "\tTemp::\n\t\tCommitted: {}\n\t\tUsed: {}\n\t\tWaste: {}", //
+        "\tTemp:\n\t\tCommitted: {}\n\t\tUsed: {}\n\t\tWaste: {}", //
         .{ temp_mem.commit_pos, temp_mem.alloc_pos, temp_mem.commit_pos - temp_mem.alloc_pos });
 }
 
