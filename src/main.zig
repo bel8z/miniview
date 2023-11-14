@@ -210,18 +210,22 @@ pub fn panic(err: []const u8, maybe_trace: ?*std.builtin.StackTrace, ret_addr: ?
     std.os.abort();
 }
 
-var main_mem: Memory = undefined;
-var cache_mem: Memory = undefined;
-var temp_mem: Memory = undefined;
+// TODO (Matteo): Implement some logic as methods?
+var g = struct {
+    main_mem: Memory = undefined,
+    cache_mem: Memory = undefined,
+    temp_mem: Memory = undefined,
 
-var images: *ImageCache = undefined;
-var files = std.ArrayListUnmanaged(FileInfo){};
-var curr_file: usize = 0;
-var curr_image: ?*gdip.Image = null;
+    images: *ImageCache = undefined,
+    files: std.ArrayListUnmanaged(FileInfo) = .{},
+    curr_file: usize = 0,
+    curr_image: ?*gdip.Image = null,
 
-var iocp: win32.HANDLE = undefined;
+    // TODO (Matteo): Move to image store implementation
+    iocp: win32.HANDLE = undefined,
 
-var debug_buf: []u8 = &[_]u8{};
+    debug_buf: []u8 = &[_]u8{},
+}{};
 
 fn innerMain() anyerror!void {
     // Init memory block
@@ -229,17 +233,17 @@ fn innerMain() anyerror!void {
     const cache_buf = reserved_buf[0..cache_bytes];
     reserved_buf = reserved_buf[cache_buf.len..];
 
-    cache_mem = Memory.fromReserved(cache_buf);
-    main_mem = Memory.fromReserved(reserved_buf[0 .. reserved_buf.len / 2]);
-    temp_mem = Memory.fromReserved(reserved_buf[reserved_buf.len / 2 ..]);
+    g.cache_mem = Memory.fromReserved(cache_buf);
+    g.main_mem = Memory.fromReserved(reserved_buf[0 .. reserved_buf.len / 2]);
+    g.temp_mem = Memory.fromReserved(reserved_buf[reserved_buf.len / 2 ..]);
 
     // Allocate persistent data
-    if (builtin.mode == .Debug) debug_buf = try main_mem.alloc(u8, 4096);
-    images = try main_mem.create(ImageCache);
-    images.* = .{};
+    if (builtin.mode == .Debug) g.debug_buf = try g.main_mem.alloc(u8, 4096);
+    g.images = try g.main_mem.create(ImageCache);
+    g.images.* = .{};
 
     // Create IO completion port for async file reading
-    iocp = try win32.CreateIoCompletionPort(win32.INVALID_HANDLE_VALUE, null, 0, 0);
+    g.iocp = try win32.CreateIoCompletionPort(win32.INVALID_HANDLE_VALUE, null, 0, 0);
 
     // Register window class
     const hinst = win32.getCurrentInstance();
@@ -312,7 +316,7 @@ fn innerMain() anyerror!void {
     }
 
     // Main loop
-    defer images.clear();
+    defer g.images.clear();
 
     var msg: win32.MSG = undefined;
 
@@ -368,11 +372,11 @@ fn processEvent(
             }
         },
         win32.WM_KEYDOWN => {
-            const file_count = files.items.len;
+            const file_count = g.files.items.len;
             if (file_count < 2) return false;
             switch (wparam) {
-                0x25 => curr_file = if (curr_file == 0) file_count - 1 else curr_file - 1, // Prev
-                0x27 => curr_file = if (curr_file == file_count - 1) 0 else curr_file + 1, // Next
+                0x25 => g.curr_file = if (g.curr_file == 0) file_count - 1 else g.curr_file - 1, // Prev
+                0x27 => g.curr_file = if (g.curr_file == file_count - 1) 0 else g.curr_file + 1, // Next
                 else => return false,
             }
 
@@ -423,7 +427,7 @@ fn paint(dc: win32.HDC, rect: win32.RECT) !void {
 
     try gdip.checkStatus(gdip.graphicsClear(gfx, 0xFFF0F0F0));
 
-    if (curr_image) |bmp| {
+    if (g.curr_image) |bmp| {
         // Compute dimensions
         const bounds = rect;
         const bounds_w = @as(f32, @floatFromInt(bounds.right - bounds.left));
@@ -513,10 +517,10 @@ fn loadFileDirectory(win: win32.HWND, full_path: PathBuf, name_offset: usize) !v
     const dir_name = full_path.name()[0..name_offset];
 
     // Clear list and cache and prepare allocations
-    curr_file = 0;
-    files.clearRetainingCapacity();
-    images.clear();
-    var allocator = main_mem.allocator();
+    g.curr_file = 0;
+    g.files.clearRetainingCapacity();
+    g.images.clear();
+    var allocator = g.main_mem.allocator();
 
     // Prepare pattern for iteration (copy full path, insert wilcard after the directory part and
     // terminate)
@@ -540,7 +544,7 @@ fn loadFileDirectory(win: win32.HWND, full_path: PathBuf, name_offset: usize) !v
 
         if (isSupportedW(curr_name)) {
             // Push file to the list
-            var file = try files.addOne(allocator);
+            var file = try g.files.addOne(allocator);
 
             // Copy full path
             file.* = .{};
@@ -554,7 +558,7 @@ fn loadFileDirectory(win: win32.HWND, full_path: PathBuf, name_offset: usize) !v
 
             // Update browse index
             if (mem.eql(u16, file.name(), file_name)) {
-                curr_file = files.items.len - 1;
+                g.curr_file = g.files.items.len - 1;
             }
         }
     }
@@ -564,14 +568,14 @@ fn loadFileDirectory(win: win32.HWND, full_path: PathBuf, name_offset: usize) !v
 
 /// Update image to display
 fn updateImage(win: win32.HWND) !void {
-    const file_count = files.items.len;
+    const file_count = g.files.items.len;
     if (file_count == 0) return;
 
-    assert(curr_file >= 0);
+    assert(g.curr_file >= 0);
 
-    const file_name = files.items[curr_file].name();
+    const file_name = g.files.items[g.curr_file].name();
 
-    curr_image = loadInCache(curr_file) catch |err| switch (err) {
+    g.curr_image = loadInCache(g.curr_file) catch |err| switch (err) {
         error.InvalidParameter => {
             try showNotSupported(win, file_name);
             return;
@@ -584,8 +588,8 @@ fn updateImage(win: win32.HWND) !void {
 
     // TODO (Matteo): Prefefetch asynchronously
     if (prefetch) {
-        const prev_file = if (curr_file == 0) file_count - 1 else curr_file - 1;
-        const next_file = if (curr_file == file_count - 1) 0 else curr_file + 1;
+        const prev_file = if (g.curr_file == 0) file_count - 1 else g.curr_file - 1;
+        const next_file = if (g.curr_file == file_count - 1) 0 else g.curr_file + 1;
         _ = loadInCache(next_file) catch {};
         _ = loadInCache(prev_file) catch {};
     }
@@ -593,10 +597,10 @@ fn updateImage(win: win32.HWND) !void {
 
 // TODO (Matteo): Review image storage
 fn loadInCache(index: usize) !*gdip.Image {
-    const file = &files.items[index];
+    const file = &g.files.items[index];
 
     while (true) {
-        if (images.get(file.handle)) |cached| {
+        if (g.images.get(file.handle)) |cached| {
             switch (cached.*) {
                 .None => {
                     const image = try loadImageFile(file.name());
@@ -609,7 +613,7 @@ fn loadInCache(index: usize) !*gdip.Image {
             break;
         }
 
-        file.handle = images.new();
+        file.handle = g.images.new();
     }
 }
 
@@ -632,15 +636,15 @@ fn loadImageFile(file_name: [:0]const u16) !*gdip.Image {
 
     // Read all file in a temporary block
     const size = @as(usize, @intCast(try win32.GetFileSizeEx(file)));
-    const block = try cache_mem.alloc(u8, size);
-    defer cache_mem.free(block);
+    const block = try g.cache_mem.alloc(u8, size);
+    defer g.cache_mem.free(block);
 
     // Emulate asyncronous read
     var ovp_in = mem.zeroInit(win32.OVERLAPPED, .{});
     var ovp_out: ?*win32.OVERLAPPED = undefined;
     var bytes: u32 = undefined;
     var key: usize = undefined;
-    _ = try win32.CreateIoCompletionPort(file, iocp, 0, 0);
+    _ = try win32.CreateIoCompletionPort(file, g.iocp, 0, 0);
     if (win32.kernel32.ReadFile(
         file,
         block.ptr,
@@ -658,7 +662,7 @@ fn loadImageFile(file_name: [:0]const u16) !*gdip.Image {
             },
         }
     }
-    switch (win32.GetQueuedCompletionStatus(iocp, &bytes, &key, &ovp_out, win32.INFINITE)) {
+    switch (win32.GetQueuedCompletionStatus(g.iocp, &bytes, &key, &ovp_out, win32.INFINITE)) {
         .Normal => {},
         else => return error.Unexpected,
     }
@@ -714,24 +718,24 @@ fn bufPrintW(buf: []u8, comptime fmt: []const u8, args: anytype) ![:0]const u16 
 
 /// Allocate memory from the temporary storage
 fn tempAlloc(comptime T: type, size: usize) Memory.Error![]T {
-    return temp_mem.alloc(T, size);
+    return g.temp_mem.alloc(T, size);
 }
 
 /// Free memory allocated from the temporary storage.
 /// Assert that the allocation is the last one (basic leakage check)
 fn tempFree(slice: anytype) void {
-    assert(temp_mem.isLastAllocation(mem.sliceAsBytes(slice)));
-    temp_mem.free(slice);
+    assert(g.temp_mem.isLastAllocation(mem.sliceAsBytes(slice)));
+    g.temp_mem.free(slice);
 }
 
 /// Write debug information on the given surface (DC)
 fn debugInfo(dc: win32.HDC) void {
     var y: i32 = 0;
 
-    const total_commit = main_mem.commit_pos + temp_mem.commit_pos + cache_mem.commit_pos;
-    const total_used = main_mem.alloc_pos + temp_mem.alloc_pos + cache_mem.alloc_pos;
+    const total_commit = g.main_mem.commit_pos + g.temp_mem.commit_pos + g.cache_mem.commit_pos;
+    const total_used = g.main_mem.alloc_pos + g.temp_mem.alloc_pos + g.cache_mem.alloc_pos;
 
-    y = debugText(dc, y, "Debug mode\n# files: {}", .{files.items.len});
+    y = debugText(dc, y, "Debug mode\n# files: {}", .{g.files.items.len});
     y = debugText(dc, y, "Memory usage", .{});
 
     y = debugText(dc, y, //
@@ -740,21 +744,21 @@ fn debugInfo(dc: win32.HDC) void {
 
     y = debugText(dc, y, //
         "\tMain:  \n\t\tCommitted: {}\n\t\tUsed: {}\n\t\tWaste: {}", //
-        .{ main_mem.commit_pos, main_mem.alloc_pos, main_mem.commit_pos - main_mem.alloc_pos });
+        .{ g.main_mem.commit_pos, g.main_mem.alloc_pos, g.main_mem.commit_pos - g.main_mem.alloc_pos });
 
     y = debugText(dc, y, //
         "\tCache: \n\t\tCommitted: {}\n\t\tUsed: {}\n\t\tWaste: {}", //
-        .{ cache_mem.commit_pos, cache_mem.alloc_pos, cache_mem.commit_pos - cache_mem.alloc_pos });
+        .{ g.cache_mem.commit_pos, g.cache_mem.alloc_pos, g.cache_mem.commit_pos - g.cache_mem.alloc_pos });
 
     y = debugText(dc, y, //
         "\tTemp:\n\t\tCommitted: {}\n\t\tUsed: {}\n\t\tWaste: {}", //
-        .{ temp_mem.commit_pos, temp_mem.alloc_pos, temp_mem.commit_pos - temp_mem.alloc_pos });
+        .{ g.temp_mem.commit_pos, g.temp_mem.alloc_pos, g.temp_mem.commit_pos - g.temp_mem.alloc_pos });
 }
 
 fn debugText(dc: win32.HDC, y: i32, comptime fmt: []const u8, args: anytype) i32 {
     _ = win32.SetBkMode(dc, .Transparent);
 
-    const text = bufPrintW(debug_buf, fmt, args) catch return y;
+    const text = bufPrintW(g.debug_buf, fmt, args) catch return y;
     const text_len = @as(c_int, @intCast(text.len));
     const flags = win32.DT_TOP | win32.DT_LEFT | win32.DT_EXPANDTABS;
     const tabs = win32.DT_TABSTOP | 0x300;
