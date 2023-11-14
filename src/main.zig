@@ -1,6 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const assert = std.debug.assert;
+const mem = std.mem;
+const unicode = std.unicode;
+const FixedBufferAllocator = std.heap.FixedBufferAllocator;
 
 const win32 = @import("win32.zig");
 const gdip = @import("gdip.zig");
@@ -23,7 +26,7 @@ const app_name = L("MiniView");
 const filter = "*.bmp;*.png;*.jpg;*.jpeg;*.tiff";
 const extensions = init: {
     comptime var temp: [5][]const u8 = undefined;
-    comptime var tokens = std.mem.tokenize(u8, filter, ";*");
+    comptime var tokens = mem.tokenize(u8, filter, ";*");
     comptime var index: usize = 0;
     inline while (tokens.next()) |token| {
         temp[index] = token;
@@ -118,27 +121,35 @@ const ImageCache = struct {
     }
 };
 
-/// Fixed buffer for storing a null-terminated, UTF-16 encoded, "wide" string
-/// Space for 'size' + 1 16-bit characters is statically reserved, accounting for the 0 terminator
-fn StrBuf(comptime size: usize) type {
-    const buf_size = size + 1;
+const PathBuf = struct {
+    // Compute aligned buffer size for u16 paths with null termination. Since MAX_PATH should
+    // be 260, this should not take a lot of space.
+    pub const size = mem.alignForward(usize, win32.MAX_PATH + 1, @alignOf(u16));
+    buf: [size]u16 = mem.zeroes([size]u16),
+    len: usize = 0,
 
-    return struct {
-        buf: [buf_size]u16 = [_]u16{0} ** buf_size,
-        len: usize = 0,
-    };
-}
+    pub inline fn name(self: PathBuf) [:0]const u16 {
+        self.validate();
+        return self.buf[0..self.len :0];
+    }
+
+    pub inline fn measure(self: *PathBuf) bool {
+        self.len = mem.indexOfScalar(u16, &self.buf, 0) orelse return false;
+        return true;
+    }
+
+    pub fn validate(self: PathBuf) void {
+        assert(self.len <= self.buf.len);
+        assert(self.buf[self.len] == 0);
+    }
+};
 
 const FileInfo = struct {
-    // NOTE (Matteo): Add space for the null terminator. Since NAME_MAX should
-    // be 255, this amounts to 256 * 2 = 512 bytes of space. Not a lot.
-    path: StrBuf(win32.NAME_MAX) = .{},
+    path: PathBuf = .{},
     handle: ImageCache.Handle = .{},
 
     pub inline fn name(self: *const FileInfo) [:0]const u16 {
-        const len = self.path.len;
-        assert(self.path.buf[len] == 0);
-        return self.path.buf[0..len :0];
+        return self.path.name();
     }
 };
 
@@ -184,10 +195,10 @@ pub fn panic(err: []const u8, maybe_trace: ?*std.builtin.StackTrace, ret_addr: ?
     // TODO (Matteo): When text is going back and forth between Zig's stdlib and
     // Win32 a lot of UTF8<->UTF16 conversions are involved; maybe we can mitigate
     // this a bit by fully embracing Win32 and UTF16.
-    var alloc = std.heap.FixedBufferAllocator.init(buf.writableSlice(0));
+    var alloc = FixedBufferAllocator.init(buf.writableSlice(0));
     _ = win32.messageBoxW(
         null,
-        std.unicode.utf8ToUtf16LeWithNull(alloc.allocator(), buf.readableSlice(0)) catch unreachable,
+        unicode.utf8ToUtf16LeWithNull(alloc.allocator(), buf.readableSlice(0)) catch unreachable,
         app_name,
         win32.MB_ICONERROR | win32.MB_OK,
     ) catch unreachable;
@@ -207,7 +218,6 @@ var images: *ImageCache = undefined;
 var files = std.ArrayListUnmanaged(FileInfo){};
 var curr_file: usize = 0;
 var curr_image: ?*gdip.Image = null;
-var path: StrBuf(win32.PATH_MAX_WIDE) = undefined;
 
 var iocp: win32.HANDLE = undefined;
 
@@ -286,13 +296,19 @@ fn innerMain() anyerror!void {
     _ = win32.showWindow(win, win32.SW_SHOWDEFAULT);
     try win32.updateWindow(win);
 
-    win32.dragAcceptFiles(win, true);
+    win32.DragAcceptFiles(win, win32.TRUE);
 
     // Handle command line
     {
         const args = win32.getArgs();
         defer win32.freeArgs(args);
-        if (args.len > 1) try loadFile(win, args[1][0..std.mem.len(args[1]) :0]);
+        if (args.len > 1) {
+            var path = PathBuf{};
+            path.len = mem.len(args[1]);
+            path.validate();
+            mem.copy(u16, path.buf[0..path.len], args[1][0..path.len]);
+            try loadFile(win, path);
+        }
     }
 
     // Main loop
@@ -364,15 +380,26 @@ fn processEvent(
         },
         win32.WM_DROPFILES => {
             const drop: win32.HDROP = @ptrFromInt(wparam);
-            defer win32.dragFinish(drop);
+            defer win32.DragFinish(drop);
 
-            if (win32.dragQueryFileCount(drop) == 1) {
-                var buf = try tempAlloc(u16, win32.PATH_MAX_WIDE);
-                defer tempFree(buf);
+            const drag_count = win32.DragQueryFileW(drop, 0xFFFFFFFF, null, 0);
 
-                const name = win32.dragQueryFile(drop, 0, buf);
-                try loadFile(win, name);
+            if (drag_count == 1) {
+                var path = PathBuf{};
+                path.len = win32.DragQueryFileW(drop, 0, null, 0);
+                path.validate();
+
+                const actual_len = win32.DragQueryFileW(
+                    drop,
+                    0,
+                    @ptrCast(&path.buf[0]),
+                    @intCast(path.buf.len),
+                );
+                assert(actual_len == path.len);
+
+                try loadFile(win, path);
             } else {
+                // TODO (Matteo): Print how many files were dropped?
                 _ = try win32.messageBoxW(
                     win,
                     L("Dropping multiple files is not supported"),
@@ -450,97 +477,89 @@ fn setTitle(win: win32.HWND, file_name: [:0]const u16) !void {
 
 /// Open an image file via modal dialog
 fn open(win: win32.HWND) !void {
-    var buf = try tempAlloc(u16, win32.PATH_MAX_WIDE);
-    defer tempFree(buf);
-
-    buf[0] = 0;
-
-    var ptr = @as([*:0]u16, @ptrCast(&buf[0]));
+    var path = PathBuf{};
+    var ptr = @as([*:0]u16, @ptrCast(&path.buf[0]));
     var ofn = win32.OPENFILENAMEW{
         .hwndOwner = win,
         .lpstrFile = ptr,
-        .nMaxFile = @as(u32, @intCast(buf.len)),
+        .nMaxFile = @as(u32, @intCast(path.buf.len)),
         .lpstrFilter = L("Image files\x00") ++ L(filter) ++ L("\x00"),
     };
 
     if (try win32.getOpenFileName(&ofn)) {
-        const offset = ofn.nFileOffset;
-
-        std.mem.copy(u16, path.buf[0..offset], buf[0..offset]);
-        path.buf[offset] = 0;
-        path.len = offset;
-
-        const filename_len = std.mem.indexOfScalar(u16, buf[offset..], 0) orelse unreachable;
-        buf[filename_len] = 0;
-
-        const dirname = path.buf[0..offset :0];
-        const filename = buf[offset..][0..filename_len :0];
-
-        try loadDirectory(win, dirname, filename);
+        if (!path.measure()) return error.InvalidPath;
+        try loadFileDirectory(win, path, ofn.nFileOffset);
     }
 }
 
 /// Load an image file from explicit path
-fn loadFile(win: win32.HWND, wpath: [:0]const u16) !void {
-    if (!isSupportedW(wpath)) {
-        try showNotSupported(win, wpath);
+fn loadFile(win: win32.HWND, path_buf: PathBuf) !void {
+    const path = path_buf.name();
+
+    if (!isSupportedW(path)) {
+        try showNotSupported(win, path);
         return;
     }
 
     // Split path in file and directory names
-    const sep = std.mem.lastIndexOfScalar(u16, wpath, '\\') orelse return error.InvalidPath;
-
-    path.len = sep + 1;
-    std.mem.copy(u16, path.buf[0..], wpath[0..path.len]);
-    path.buf[path.len] = 0;
-
-    try loadDirectory(win, path.buf[0..path.len :0], wpath[path.len.. :0]);
+    const sep = mem.lastIndexOfScalar(u16, path, '\\') orelse return error.InvalidPath;
+    try loadFileDirectory(win, path_buf, sep + 1);
 }
 
 /// Load the image file paths for the given directory. Browsing starts at the given file.
-fn loadDirectory(win: win32.HWND, dirname: [:0]const u16, filename: [:0]const u16) !void {
-    // Clear current list
-    files.clearRetainingCapacity();
+fn loadFileDirectory(win: win32.HWND, full_path: PathBuf, name_offset: usize) !void {
+    // TODO (Matteo): Cleanup
+    const file_name = full_path.name()[name_offset..];
+    const dir_name = full_path.name()[0..name_offset];
+
+    // Clear list and cache and prepare allocations
     curr_file = 0;
-
-    // Wipe cache
+    files.clearRetainingCapacity();
     images.clear();
-
-    var dir = try openIterableDir(dirname);
-    defer dir.close();
-
-    // Iterate
     var allocator = main_mem.allocator();
-    var iter = dir.iterate();
-    while (try iter.next()) |entry| {
-        if (entry.kind == .file and isSupported(entry.name)) {
+
+    // Prepare pattern for iteration (copy full path, insert wilcard after the directory part and
+    // terminate)
+    var pattern = full_path;
+    pattern.len = name_offset + 1;
+    pattern.buf[name_offset] = '*';
+    pattern.buf[pattern.len] = 0;
+    pattern.validate();
+
+    // Start directory iteration
+    // NOTE (Matteo): First file is ".", skip ".." as well
+    var data: win32.WIN32_FIND_DATAW = undefined;
+    const finder = win32.kernel32.FindFirstFileW(pattern.name(), &data);
+    if (finder == win32.INVALID_HANDLE_VALUE) return error.Unexpected;
+    _ = win32.kernel32.FindNextFileW(finder, &data);
+
+    // Start iterating
+    while (win32.kernel32.FindNextFileW(finder, &data) != 0) {
+        const curr_len = mem.indexOfScalar(u16, &data.cFileName, 0) orelse unreachable;
+        const curr_name = data.cFileName[0..curr_len :0];
+
+        if (isSupportedW(curr_name)) {
             // Push file to the list
             var file = try files.addOne(allocator);
 
             // Copy full path
             file.* = .{};
-            file.path.len = try std.unicode.utf8ToUtf16Le(file.path.buf[0..], entry.name);
-            file.path.buf[file.path.len] = 0;
+            file.path.len = dir_name.len + curr_name.len;
+            file.path.validate();
+
+            // TODO (Matteo): Cleanup
+            mem.copy(u16, file.path.buf[0..dir_name.len], dir_name);
+            mem.copy(u16, file.path.buf[dir_name.len..file.path.len], curr_name);
+            file.path.validate();
 
             // Update browse index
-            const index = files.items.len - 1;
-            if (std.mem.eql(u16, file.name(), filename)) curr_file = index;
+            if (mem.eql(u16, file.name(), file_name)) {
+                curr_file = files.items.len - 1;
+            }
         }
     }
 
     try updateImage(win);
-}
-
-/// Open the given directory for iteration
-fn openIterableDir(dirname: [:0]const u16) !std.fs.IterableDir {
-    // TODO (Matteo): Get rid of this nonsense!
-    // std.fs.openIterableDirAbsoluteW is broken, at least for network paths,
-    // so we fallback to the utf8 variant
-    var buf = try tempAlloc(u8, std.fs.MAX_PATH_BYTES);
-    defer tempFree(buf);
-
-    const len = try std.unicode.utf16leToUtf8(buf, dirname);
-    return std.fs.openIterableDirAbsolute(buf[0..len], .{});
 }
 
 /// Update image to display
@@ -550,7 +569,7 @@ fn updateImage(win: win32.HWND) !void {
 
     assert(curr_file >= 0);
 
-    const file_name = getFullPath(&files.items[curr_file]);
+    const file_name = files.items[curr_file].name();
 
     curr_image = loadInCache(curr_file) catch |err| switch (err) {
         error.InvalidParameter => {
@@ -570,18 +589,6 @@ fn updateImage(win: win32.HWND) !void {
         _ = loadInCache(next_file) catch {};
         _ = loadInCache(prev_file) catch {};
     }
-}
-
-/// Get the fully qualified path for the given file; assumes the file is located
-/// in the currently loaded directory.
-fn getFullPath(file: *const FileInfo) [:0]const u16 {
-    const total = path.len + file.path.len;
-    assert(total < path.buf.len);
-
-    std.mem.copy(u16, path.buf[path.len..], file.name());
-    path.buf[total] = 0;
-
-    return path.buf[0..total :0];
 }
 
 // TODO (Matteo): Review image storage
@@ -629,7 +636,7 @@ fn loadImageFile(file_name: [:0]const u16) !*gdip.Image {
     defer cache_mem.free(block);
 
     // Emulate asyncronous read
-    var ovp_in = std.mem.zeroInit(win32.OVERLAPPED, .{});
+    var ovp_in = mem.zeroInit(win32.OVERLAPPED, .{});
     var ovp_out: ?*win32.OVERLAPPED = undefined;
     var bytes: u32 = undefined;
     var key: usize = undefined;
@@ -671,47 +678,38 @@ fn loadImageFile(file_name: [:0]const u16) !*gdip.Image {
 }
 
 /// Check if the given file name has a supported image format, based on the extension
-/// Variant for utf16 "wide" strings
 fn isSupportedW(filename: [:0]const u16) bool {
     var buf: [256]u8 = undefined;
-    const dot = std.mem.lastIndexOfScalar(u16, filename, '.') orelse return false;
-    const len = std.unicode.utf16leToUtf8(buf[0..], filename[dot..filename.len]) catch return false;
+    const dot = mem.lastIndexOfScalar(u16, filename, '.') orelse return false;
+    const len = unicode.utf16leToUtf8(buf[0..], filename[dot..filename.len]) catch return false;
     return isSupportedExt(buf[0..len]);
-}
-
-/// Check if the given file name has a supported image format, based on the extension
-/// Variant for standard utf8 strings
-fn isSupported(filename: []const u8) bool {
-    const dot = std.mem.lastIndexOfScalar(u8, filename, '.') orelse return false;
-    return isSupportedExt(filename[dot..]);
 }
 
 /// Check if the given file extension identifies a supported image file format
 fn isSupportedExt(ext: []const u8) bool {
-    if (ext.len == 0) return false;
-
-    for (extensions, 0..) |token, index| {
-        _ = index;
-        if (std.ascii.eqlIgnoreCase(token, ext)) return true;
+    if (ext.len > 0) {
+        for (extensions, 0..) |token, index| {
+            _ = index;
+            if (std.ascii.eqlIgnoreCase(token, ext)) return true;
+        }
     }
-
     return false;
 }
 
 /// Display a message box indicating that the given file is not supported
 fn showNotSupported(win: ?win32.HWND, file_path: [:0]const u16) !void {
-    var buf = try tempAlloc(u8, 2 * std.fs.MAX_PATH_BYTES);
+    var buf = try tempAlloc(u8, 3 * PathBuf.size);
     defer tempFree(buf);
 
-    const out = try bufPrintW(buf, "File not supported:\n{s}", .{std.unicode.fmtUtf16le(file_path)});
+    const out = try bufPrintW(buf, "File not supported:\n{s}", .{unicode.fmtUtf16le(file_path)});
     _ = try win32.messageBoxW(win, out, app_name, 0);
 }
 
 /// Format message to a utf16 "wide" string
 fn bufPrintW(buf: []u8, comptime fmt: []const u8, args: anytype) ![:0]const u16 {
     const str = try std.fmt.bufPrint(buf, fmt, args);
-    var alloc = std.heap.FixedBufferAllocator.init(buf[str.len..]);
-    return std.unicode.utf8ToUtf16LeWithNull(alloc.allocator(), str);
+    var alloc = FixedBufferAllocator.init(buf[str.len..]);
+    return unicode.utf8ToUtf16LeWithNull(alloc.allocator(), str);
 }
 
 /// Allocate memory from the temporary storage
@@ -722,7 +720,7 @@ fn tempAlloc(comptime T: type, size: usize) Memory.Error![]T {
 /// Free memory allocated from the temporary storage.
 /// Assert that the allocation is the last one (basic leakage check)
 fn tempFree(slice: anytype) void {
-    assert(temp_mem.isLastAllocation(std.mem.sliceAsBytes(slice)));
+    assert(temp_mem.isLastAllocation(mem.sliceAsBytes(slice)));
     temp_mem.free(slice);
 }
 

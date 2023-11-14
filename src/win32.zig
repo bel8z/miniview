@@ -149,43 +149,19 @@ extern "shell32" fn CommandLineToArgvW(
 
 pub const HDROP = *opaque {};
 
-pub inline fn dragAcceptFiles(win: win32.HWND, accept: bool) void {
-    DragAcceptFiles(win, @intFromBool(accept));
-}
-
-pub inline fn dragFinish(drop: HDROP) void {
-    DragFinish(drop);
-}
-
-pub inline fn dragQueryFileCount(drop: HDROP) c_uint {
-    return DragQueryFileW(drop, 0xFFFFFFFF, null, 0);
-}
-
-pub inline fn dragQueryFileLength(drop: HDROP, index: c_uint) c_uint {
-    return DragQueryFileW(drop, index, null, 0);
-}
-
-pub inline fn dragQueryFile(drop: HDROP, index: c_uint, buf: []u16) [:0]u16 {
-    const expected_len = dragQueryFileLength(drop, index);
-    assert(buf.len >= expected_len + 1);
-    const actual_len = DragQueryFileW(drop, index, @ptrCast(buf.ptr), @intCast(buf.len));
-    assert(expected_len == actual_len);
-    return buf[0..actual_len :0];
-}
-
-extern "shell32" fn DragAcceptFiles(
+pub extern "shell32" fn DragAcceptFiles(
     win: win32.HWND,
     accept: win32.BOOL,
 ) callconv(win32.WINAPI) void;
 
-extern "shell32" fn DragQueryFileW(
+pub extern "shell32" fn DragQueryFileW(
     drop: HDROP,
     file: c_uint,
     lpszFile: ?[*:0]u16,
     cch: c_uint,
 ) callconv(win32.WINAPI) c_uint;
 
-extern "shell32" fn DragFinish(
+pub extern "shell32" fn DragFinish(
     drop: HDROP,
 ) callconv(win32.WINAPI) void;
 
