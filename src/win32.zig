@@ -200,18 +200,15 @@ extern "kernel32" fn CompareStringOrdinal(
 
 pub const Error = error{Unexpected};
 
-pub extern "kernel32" fn GetLastError() callconv(win32.WINAPI) u32;
-pub extern "kernel32" fn SetLastError(dwErrCode: u32) callconv(win32.WINAPI) void;
-
 pub const ERROR_SIZE: usize = 614;
 
-pub fn formatError(err: u32, buffer: []u8) ![]u8 {
+pub fn formatError(err: win32.Win32Error, buffer: []u8) ![]u8 {
     var wbuffer: [ERROR_SIZE]u16 = undefined;
 
     var len = FormatMessageW(
         win32.FORMAT_MESSAGE_FROM_SYSTEM | win32.FORMAT_MESSAGE_IGNORE_INSERTS,
         null,
-        err,
+        @intFromEnum(err),
         (0x01 << 10), // MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
         &wbuffer,
         wbuffer.len,
@@ -409,6 +406,9 @@ pub const BufferedPaint = struct {
         }
     }
 };
+
+// TODO (Matteo): Left as a way to report HRESULT. Find a better solution.
+extern "kernel32" fn SetLastError(dwErrCode: u32) callconv(win32.WINAPI) void;
 
 pub inline fn invalidateRect(
     win: win32.HWND,

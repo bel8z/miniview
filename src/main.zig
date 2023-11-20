@@ -180,8 +180,8 @@ pub fn panic(err: []const u8, maybe_trace: ?*std.builtin.StackTrace, ret_addr: ?
         var writer = buf.writer();
         writer.print("{s}", .{err}) catch unreachable;
 
-        const win_err = win32.GetLastError();
-        if (win_err != 0) {
+        const win_err = win32.kernel32.GetLastError();
+        if (win_err != .SUCCESS) {
             var buf_utf8: [win32.ERROR_SIZE]u8 = undefined;
             writer.print("\n\nGetLastError() =  0x{x}: {s}", .{
                 win_err,
@@ -652,12 +652,13 @@ fn loadImageFile(file_name: [:0]const u16) !*gdip.Image {
         null,
         &ovp_in,
     ) == 0) {
-        const err = win32.GetLastError();
+        const err = win32.kernel32.GetLastError();
         switch (err) {
-            997 => {}, // ERROR_IO_PENDING
+            .IO_PENDING => {}, // ERROR_IO_PENDING
             else => {
-                // Restore error code and fail
-                win32.SetLastError(err);
+                // NOTE (Matteo): Restore error code and fail; our panic handler is responsible
+                // for reporting the error in a proper way
+                win32.kernel32.SetLastError(err);
                 return error.Unexpected;
             },
         }
