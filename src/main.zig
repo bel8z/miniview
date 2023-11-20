@@ -685,9 +685,14 @@ const ImageStore = struct {
     }
 
     memory: *Memory,
-    iocp: win32.HANDLE = undefined,
     nodes: [cache_size]Node = [_]Node{.{}} ** cache_size,
     count: Int = 0,
+
+    // NOTE (Matteo): This is used to perform async disk reads; unfortunately,
+    // GDI+ uses a ref-counted stream as a storage for the bitmap, requiring
+    // an unnecessary memory copy. Since it does not support IOCP reading, maybe
+    // we should move to a direct file read GDI+ call and ditch IOCP.
+    iocp: win32.HANDLE = undefined,
 
     pub fn init(memory: *Memory) !*ImageStore {
         var self = try memory.create(ImageStore);
@@ -749,8 +754,15 @@ const ImageStore = struct {
 
     // TODO (Matteo): Review image storage
     fn loadImageFile(self: *ImageStore, file_name: [:0]const u16) !*gdip.Image {
+        // Emulate asyncronous read
+        const block = try self.beginLoad(file_name);
+        return self.endLoad(block);
+    }
+
+    fn beginLoad(self: *ImageStore, file_name: [:0]const u16) ![]u8 {
         const wide_path = try win32.wToPrefixedFileW(file_name);
 
+        // NOTE (Matteo): Open file in overlapped (aka asynchronous) mode
         const file = win32.kernel32.CreateFileW(
             wide_path.span(),
             win32.GENERIC_READ,
@@ -762,22 +774,22 @@ const ImageStore = struct {
         );
         if (file == win32.INVALID_HANDLE_VALUE) return error.Unexpected;
 
-        // Read all file in a temporary block
-        const size = @as(usize, @intCast(try win32.GetFileSizeEx(file)));
+        // NOTE (Matteo): No need to keep this open after read started
+        defer win32.CloseHandle(file);
+
+        // NOTE (Matteo): Allocate a temporary block to read entire file into
+        const size = try win32.GetFileSizeEx(file);
         const block = try self.memory.alloc(u8, size);
 
-        // Emulate asyncronous read
-        try self.beginLoad(file, block);
-        return self.endLoad(file, block);
-    }
-
-    fn beginLoad(self: *ImageStore, file: win32.HANDLE, block: []u8) !void {
-        var ovp_in = mem.zeroInit(win32.OVERLAPPED, .{});
+        // NOTE (Matteo): Bind file to IOCP
         _ = try win32.CreateIoCompletionPort(file, self.iocp, 0, 0);
+
+        // NOTE (Matteo): Start asynchronous read
+        var ovp_in = mem.zeroInit(win32.OVERLAPPED, .{});
         if (win32.kernel32.ReadFile(
             file,
             block.ptr,
-            @as(u32, @intCast(block.len)),
+            @intCast(size),
             null,
             &ovp_in,
         ) == 0) {
@@ -792,12 +804,16 @@ const ImageStore = struct {
                 },
             }
         }
+
+        return block;
     }
 
-    fn endLoad(self: *ImageStore, file: win32.HANDLE, block: []u8) !*gdip.Image {
-        defer win32.CloseHandle(file);
+    fn endLoad(self: *ImageStore, block: []const u8) !*gdip.Image {
+        // TODO (Matteo): When going async, this should be replaced with a full
+        // memory reset after all pending reads are completed
         defer self.memory.free(block);
 
+        // NOTE (Matteo): Query IOCP for completed reads
         var bytes: u32 = undefined;
         var key: usize = undefined;
         var ovp_out: ?*win32.OVERLAPPED = undefined;
@@ -813,6 +829,8 @@ const ImageStore = struct {
         const stream = try win32.createMemStream(block);
         defer _ = stream.release();
 
+        // NOTE (Matteo): Decode image using GDI+. Unfortunately, this requires
+        // to hold a copy of the image memory, hence the stream management above.
         var new_image: *gdip.Image = undefined;
         const status = gdip.createImageFromStream(stream, &new_image);
         try gdip.checkStatus(status);
