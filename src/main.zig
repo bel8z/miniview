@@ -39,8 +39,9 @@ const extensions = init: {
 // TODO (Matteo): 1GB should be enough, right? Mind that on x86 Windows the
 // available address space should be 2GB, but reserving that much failed...
 const reserved_bytes: usize = 1024 << 20;
-const cache_bytes: usize = 64 << 20;
-const cache_size: ImageCache.Int = 16;
+
+// NOTE (Matteo): Max number of images to be cached for faster navigation
+const cache_size: ImageStore.Int = 16;
 
 // TODO (Matteo): Prefefetch asynchronously
 const prefetch = false;
@@ -51,7 +52,7 @@ fn RingBuffer(comptime T: type) type {
     return std.fifo.LinearFifo(T, .Slice);
 }
 
-const ImageCache = struct {
+const ImageStore = struct {
     pub const Image = union(enum) { None, Loaded: *gdip.Image };
     pub const Handle = packed struct {
         idx: Int = 0,
@@ -73,16 +74,27 @@ const ImageCache = struct {
     const Int = std.meta.Int(.unsigned, @divExact(@bitSizeOf(usize), 2));
 
     const Node = struct { gen: Int = 0, val: Image = .None };
-    const Self = @This();
 
     comptime {
         assert(std.math.isPowerOfTwo(cache_size));
     }
 
+    memory: *Memory,
+    iocp: win32.HANDLE = undefined,
     nodes: [cache_size]Node = [_]Node{.{}} ** cache_size,
     count: Int = 0,
 
-    pub fn new(self: *Self) Handle {
+    pub fn init(memory: *Memory) !*ImageStore {
+        var self = try memory.create(ImageStore);
+        self.* = .{
+            .memory = memory,
+            // Create IO completion port for async file reading
+            .iocp = try win32.CreateIoCompletionPort(win32.INVALID_HANDLE_VALUE, null, 0, 0),
+        };
+        return self;
+    }
+
+    pub fn new(self: *ImageStore) Handle {
         const idx = @atomicRmw(Int, &self.count, .Add, 1, .SeqCst) & (cache_size - 1);
 
         var node = &self.nodes[idx];
@@ -102,13 +114,23 @@ const ImageCache = struct {
         return handle;
     }
 
-    pub fn get(self: *Self, handle: Handle) ?*Image {
+    pub fn get(self: *ImageStore, handle: Handle, filename: [:0]const u16) ?*gdip.Image {
         if (handle.gen == 0) return null;
+
         const node = &self.nodes[handle.idx];
-        return if (node.gen == handle.gen) &node.val else null;
+        if (node.gen != handle.gen) return null;
+
+        switch (node.val) {
+            .None => {
+                const image = self.loadImageFile(filename) catch return null;
+                node.val = .{ .Loaded = image };
+                return image;
+            },
+            .Loaded => |image| return image,
+        }
     }
 
-    pub fn clear(self: *Self) void {
+    pub fn clear(self: *ImageStore) void {
         for (&self.nodes) |*node| {
             switch (node.val) {
                 .Loaded => |ptr| gdip.checkStatus(gdip.disposeImage(ptr)) catch unreachable,
@@ -118,6 +140,71 @@ const ImageCache = struct {
             node.gen = 0;
         }
         self.count = 0;
+    }
+
+    // TODO (Matteo): Review image storage
+    fn loadImageFile(self: *ImageStore, file_name: [:0]const u16) !*gdip.Image {
+        const wide_path = try win32.wToPrefixedFileW(file_name);
+
+        const file = win32.kernel32.CreateFileW(
+            wide_path.span(),
+            win32.GENERIC_READ,
+            win32.FILE_SHARE_READ,
+            null,
+            win32.OPEN_EXISTING,
+            win32.FILE_ATTRIBUTE_NORMAL | win32.FILE_FLAG_OVERLAPPED,
+            null,
+        );
+        if (file == win32.INVALID_HANDLE_VALUE) return error.Unexpected;
+
+        defer win32.CloseHandle(file);
+
+        // Read all file in a temporary block
+        const size = @as(usize, @intCast(try win32.GetFileSizeEx(file)));
+        const block = try self.memory.alloc(u8, size);
+        defer self.memory.free(block);
+
+        // Emulate asyncronous read
+        var ovp_in = mem.zeroInit(win32.OVERLAPPED, .{});
+        var ovp_out: ?*win32.OVERLAPPED = undefined;
+        var bytes: u32 = undefined;
+        var key: usize = undefined;
+        _ = try win32.CreateIoCompletionPort(file, self.iocp, 0, 0);
+        if (win32.kernel32.ReadFile(
+            file,
+            block.ptr,
+            @as(u32, @intCast(size)),
+            null,
+            &ovp_in,
+        ) == 0) {
+            const err = win32.kernel32.GetLastError();
+            switch (err) {
+                .IO_PENDING => {}, // ERROR_IO_PENDING
+                else => {
+                    // NOTE (Matteo): Restore error code and fail; our panic handler is responsible
+                    // for reporting the error in a proper way
+                    win32.kernel32.SetLastError(err);
+                    return error.Unexpected;
+                },
+            }
+        }
+        switch (win32.GetQueuedCompletionStatus(self.iocp, &bytes, &key, &ovp_out, win32.INFINITE)) {
+            .Normal => {},
+            else => return error.Unexpected,
+        }
+        assert(bytes == size);
+
+        // TODO (Matteo): Get rid of this nonsense! This seems to make a copy of the
+        // given buffer, because memory leaks if the stream is not released.
+        // I honestly expected this to behave as a wrapper.
+        const stream = try win32.createMemStream(block);
+        defer _ = stream.release();
+
+        var new_image: *gdip.Image = undefined;
+        const status = gdip.createImageFromStream(stream, &new_image);
+        try gdip.checkStatus(status);
+
+        return new_image;
     }
 };
 
@@ -146,7 +233,7 @@ const PathBuf = struct {
 
 const FileInfo = struct {
     path: PathBuf = .{},
-    handle: ImageCache.Handle = .{},
+    handle: ImageStore.Handle = .{},
 
     pub inline fn name(self: *const FileInfo) [:0]const u16 {
         return self.path.name();
@@ -213,16 +300,12 @@ pub fn panic(err: []const u8, maybe_trace: ?*std.builtin.StackTrace, ret_addr: ?
 // TODO (Matteo): Implement some logic as methods?
 var g = struct {
     main_mem: Memory = undefined,
-    cache_mem: Memory = undefined,
     temp_mem: Memory = undefined,
 
-    images: *ImageCache = undefined,
+    images: *ImageStore = undefined,
     files: std.ArrayListUnmanaged(FileInfo) = .{},
     curr_file: usize = 0,
     curr_image: ?*gdip.Image = null,
-
-    // TODO (Matteo): Move to image store implementation
-    iocp: win32.HANDLE = undefined,
 
     debug_buf: []u8 = &[_]u8{},
 }{};
@@ -230,20 +313,15 @@ var g = struct {
 fn innerMain() anyerror!void {
     // Init memory block
     var reserved_buf = try Memory.rawReserve(reserved_bytes);
-    const cache_buf = reserved_buf[0..cache_bytes];
-    reserved_buf = reserved_buf[cache_buf.len..];
 
-    g.cache_mem = Memory.fromReserved(cache_buf);
-    g.main_mem = Memory.fromReserved(reserved_buf[0 .. reserved_buf.len / 2]);
-    g.temp_mem = Memory.fromReserved(reserved_buf[reserved_buf.len / 2 ..]);
+    g.main_mem = Memory.fromReserved(reserved_buf[0 .. reserved_buf.len / 4]);
+    g.temp_mem = Memory.fromReserved(reserved_buf[reserved_buf.len / 4 .. reserved_buf.len / 2]);
+
+    var cache_mem = Memory.fromReserved(reserved_buf[reserved_buf.len / 2 ..]);
 
     // Allocate persistent data
     if (builtin.mode == .Debug) g.debug_buf = try g.main_mem.alloc(u8, 4096);
-    g.images = try g.main_mem.create(ImageCache);
-    g.images.* = .{};
-
-    // Create IO completion port for async file reading
-    g.iocp = try win32.CreateIoCompletionPort(win32.INVALID_HANDLE_VALUE, null, 0, 0);
+    g.images = try ImageStore.init(&cache_mem);
 
     // Register window class
     const hinst = win32.getCurrentInstance();
@@ -598,88 +676,10 @@ fn updateImage(win: win32.HWND) !void {
 // TODO (Matteo): Review image storage
 fn loadInCache(index: usize) !*gdip.Image {
     const file = &g.files.items[index];
-
     while (true) {
-        if (g.images.get(file.handle)) |cached| {
-            switch (cached.*) {
-                .None => {
-                    const image = try loadImageFile(file.name());
-                    cached.* = .{ .Loaded = image };
-                    return image;
-                },
-                .Loaded => |image| return image,
-            }
-
-            break;
-        }
-
+        if (g.images.get(file.handle, file.name())) |image| return image;
         file.handle = g.images.new();
     }
-}
-
-// TODO (Matteo): Review image storage
-fn loadImageFile(file_name: [:0]const u16) !*gdip.Image {
-    const wide_path = try win32.wToPrefixedFileW(file_name);
-
-    const file = win32.kernel32.CreateFileW(
-        wide_path.span(),
-        win32.GENERIC_READ,
-        win32.FILE_SHARE_READ,
-        null,
-        win32.OPEN_EXISTING,
-        win32.FILE_ATTRIBUTE_NORMAL | win32.FILE_FLAG_OVERLAPPED,
-        null,
-    );
-    if (file == win32.INVALID_HANDLE_VALUE) return error.Unexpected;
-
-    defer win32.CloseHandle(file);
-
-    // Read all file in a temporary block
-    const size = @as(usize, @intCast(try win32.GetFileSizeEx(file)));
-    const block = try g.cache_mem.alloc(u8, size);
-    defer g.cache_mem.free(block);
-
-    // Emulate asyncronous read
-    var ovp_in = mem.zeroInit(win32.OVERLAPPED, .{});
-    var ovp_out: ?*win32.OVERLAPPED = undefined;
-    var bytes: u32 = undefined;
-    var key: usize = undefined;
-    _ = try win32.CreateIoCompletionPort(file, g.iocp, 0, 0);
-    if (win32.kernel32.ReadFile(
-        file,
-        block.ptr,
-        @as(u32, @intCast(size)),
-        null,
-        &ovp_in,
-    ) == 0) {
-        const err = win32.kernel32.GetLastError();
-        switch (err) {
-            .IO_PENDING => {}, // ERROR_IO_PENDING
-            else => {
-                // NOTE (Matteo): Restore error code and fail; our panic handler is responsible
-                // for reporting the error in a proper way
-                win32.kernel32.SetLastError(err);
-                return error.Unexpected;
-            },
-        }
-    }
-    switch (win32.GetQueuedCompletionStatus(g.iocp, &bytes, &key, &ovp_out, win32.INFINITE)) {
-        .Normal => {},
-        else => return error.Unexpected,
-    }
-    assert(bytes == size);
-
-    // TODO (Matteo): Get rid of this nonsense! This seems to make a copy of the
-    // given buffer, because memory leaks if the stream is not released.
-    // I honestly expected this to behave as a wrapper.
-    const stream = try win32.createMemStream(block);
-    defer _ = stream.release();
-
-    var new_image: *gdip.Image = undefined;
-    const status = gdip.createImageFromStream(stream, &new_image);
-    try gdip.checkStatus(status);
-
-    return new_image;
 }
 
 /// Check if the given file name has a supported image format, based on the extension
@@ -733,8 +733,9 @@ fn tempFree(slice: anytype) void {
 fn debugInfo(dc: win32.HDC) void {
     var y: i32 = 0;
 
-    const total_commit = g.main_mem.commit_pos + g.temp_mem.commit_pos + g.cache_mem.commit_pos;
-    const total_used = g.main_mem.alloc_pos + g.temp_mem.alloc_pos + g.cache_mem.alloc_pos;
+    const cache_mem = g.images.memory;
+    const total_commit = g.main_mem.commit_pos + g.temp_mem.commit_pos + cache_mem.commit_pos;
+    const total_used = g.main_mem.alloc_pos + g.temp_mem.alloc_pos + cache_mem.alloc_pos;
 
     y = debugText(dc, y, "Debug mode\n# files: {}", .{g.files.items.len});
     y = debugText(dc, y, "Memory usage", .{});
@@ -749,7 +750,7 @@ fn debugInfo(dc: win32.HDC) void {
 
     y = debugText(dc, y, //
         "\tCache: \n\t\tCommitted: {}\n\t\tUsed: {}\n\t\tWaste: {}", //
-        .{ g.cache_mem.commit_pos, g.cache_mem.alloc_pos, g.cache_mem.commit_pos - g.cache_mem.alloc_pos });
+        .{ cache_mem.commit_pos, cache_mem.alloc_pos, cache_mem.commit_pos - cache_mem.alloc_pos });
 
     y = debugText(dc, y, //
         "\tTemp:\n\t\tCommitted: {}\n\t\tUsed: {}\n\t\tWaste: {}", //
