@@ -762,23 +762,22 @@ const ImageStore = struct {
         );
         if (file == win32.INVALID_HANDLE_VALUE) return error.Unexpected;
 
-        defer win32.CloseHandle(file);
-
         // Read all file in a temporary block
         const size = @as(usize, @intCast(try win32.GetFileSizeEx(file)));
         const block = try self.memory.alloc(u8, size);
-        defer self.memory.free(block);
 
         // Emulate asyncronous read
+        try self.beginLoad(file, block);
+        return self.endLoad(file, block);
+    }
+
+    fn beginLoad(self: *ImageStore, file: win32.HANDLE, block: []u8) !void {
         var ovp_in = mem.zeroInit(win32.OVERLAPPED, .{});
-        var ovp_out: ?*win32.OVERLAPPED = undefined;
-        var bytes: u32 = undefined;
-        var key: usize = undefined;
         _ = try win32.CreateIoCompletionPort(file, self.iocp, 0, 0);
         if (win32.kernel32.ReadFile(
             file,
             block.ptr,
-            @as(u32, @intCast(size)),
+            @as(u32, @intCast(block.len)),
             null,
             &ovp_in,
         ) == 0) {
@@ -793,11 +792,20 @@ const ImageStore = struct {
                 },
             }
         }
+    }
+
+    fn endLoad(self: *ImageStore, file: win32.HANDLE, block: []u8) !*gdip.Image {
+        defer win32.CloseHandle(file);
+        defer self.memory.free(block);
+
+        var bytes: u32 = undefined;
+        var key: usize = undefined;
+        var ovp_out: ?*win32.OVERLAPPED = undefined;
         switch (win32.GetQueuedCompletionStatus(self.iocp, &bytes, &key, &ovp_out, win32.INFINITE)) {
             .Normal => {},
             else => return error.Unexpected,
         }
-        assert(bytes == size);
+        assert(bytes == block.len);
 
         // TODO (Matteo): Get rid of this nonsense! This seems to make a copy of the
         // given buffer, because memory leaks if the stream is not released.
