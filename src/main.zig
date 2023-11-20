@@ -684,7 +684,8 @@ const ImageStore = struct {
         assert(std.math.isPowerOfTwo(cache_size));
     }
 
-    memory: *Memory,
+    memory: *Memory = undefined,
+    scratch: std.heap.ArenaAllocator = undefined,
     nodes: [cache_size]Node = [_]Node{.{}} ** cache_size,
     count: Int = 0,
 
@@ -698,6 +699,7 @@ const ImageStore = struct {
         var self = try memory.create(ImageStore);
         self.* = .{
             .memory = memory,
+            .scratch = std.heap.ArenaAllocator.init(memory.allocator()),
             // Create IO completion port for async file reading
             .iocp = try win32.CreateIoCompletionPort(win32.INVALID_HANDLE_VALUE, null, 0, 0),
         };
@@ -779,7 +781,7 @@ const ImageStore = struct {
 
         // NOTE (Matteo): Allocate a temporary block to read entire file into
         const size = try win32.GetFileSizeEx(file);
-        const block = try self.memory.alloc(u8, size);
+        const block = try self.getScratch(size);
 
         // NOTE (Matteo): Bind file to IOCP
         _ = try win32.CreateIoCompletionPort(file, self.iocp, 0, 0);
@@ -809,9 +811,9 @@ const ImageStore = struct {
     }
 
     fn endLoad(self: *ImageStore, block: []const u8) !*gdip.Image {
-        // TODO (Matteo): When going async, this should be replaced with a full
-        // memory reset after all pending reads are completed
-        defer self.memory.free(block);
+        // TODO (Matteo): When going async, this should be done only after all
+        //  pending reads are completed
+        defer self.resetScratch();
 
         // NOTE (Matteo): Query IOCP for completed reads
         var bytes: u32 = undefined;
@@ -836,5 +838,16 @@ const ImageStore = struct {
         try gdip.checkStatus(status);
 
         return new_image;
+    }
+
+    fn getScratch(self: *ImageStore, size: usize) ![]u8 {
+        return self.scratch.allocator().alloc(u8, size);
+    }
+
+    fn resetScratch(self: *ImageStore) void {
+        // NOTE (Matteo): Ok to free all; the underlying implementation is a fairly efficient bump 
+        // allocator, that decommits unused memory only in safe builds in order to catch bugs; if 
+        // the perf penalty turns out to be too high we can swith to decommit in debug builds only.
+        _ = self.scratch.reset(.free_all);
     }
 };
