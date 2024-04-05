@@ -16,6 +16,7 @@ pub const Error = Allocator.Error;
 //== Data ==//
 
 bytes: []u8,
+granularity: usize = std.mem.page_size,
 alloc_pos: usize = 0,
 commit_pos: usize = 0,
 
@@ -51,7 +52,13 @@ pub fn reserve(capacity: usize) win32.VirtualAllocError!Memory {
 }
 
 pub fn fromReserved(buf: []u8) Memory {
-    return Memory{ .bytes = buf };
+    var sys_info: win32.SYSTEM_INFO = undefined;
+    win32.kernel32.GetSystemInfo(&sys_info);
+
+    return Memory{
+        .bytes = buf,
+        .granularity = sys_info.dwAllocationGranularity,
+    };
 }
 
 pub fn clear(self: *Memory) void {
@@ -65,7 +72,10 @@ pub fn decommitExcess(self: *Memory) void {
 }
 
 fn adjustCommitted(self: *Memory, target: usize) bool {
-    const min_commit = std.mem.alignForward(usize, target, std.mem.page_size);
+    const min_commit = @min(
+        self.bytes.len, // Cannot commit more than reserved
+        std.mem.alignForward(usize, target, self.granularity),
+    );
 
     if (min_commit > self.commit_pos) {
         const buf = self.bytes[self.commit_pos..min_commit];
