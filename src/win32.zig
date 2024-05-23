@@ -434,6 +434,16 @@ pub const SW_MAX = 11;
 
 pub const WNDPROC = *const fn (hwnd: win32.HWND, uMsg: c_uint, wParam: win32.WPARAM, lParam: win32.LPARAM) callconv(win32.WINAPI) win32.LRESULT;
 
+pub const MSG = extern struct {
+    hWnd: ?win32.HWND,
+    message: c_uint,
+    wParam: win32.WPARAM,
+    lParam: win32.LPARAM,
+    time: u32,
+    pt: win32.POINT,
+    lPrivate: u32,
+};
+
 pub const WNDCLASSEXW = extern struct {
     cbSize: c_uint = @sizeOf(WNDCLASSEXW),
     style: c_uint,
@@ -504,12 +514,6 @@ pub fn updateWindow(hWnd: win32.HWND) !void {
 }
 extern "user32" fn UpdateWindow(hWnd: win32.HWND) callconv(win32.WINAPI) win32.BOOL;
 
-pub inline fn waitMessage() !void {
-    const res = WaitMessage();
-    if (res == 0) return error.Unexpected;
-}
-extern "user32" fn WaitMessage() callconv(win32.WINAPI) win32.BOOL;
-
 pub fn getWindowUserPtr(win: win32.HWND, comptime T: type) !*T {
     const long = GetWindowLongPtrW(win, -21);
     if (long == 0) return error.Unexpected;
@@ -520,11 +524,39 @@ pub fn getWindowUserPtr(win: win32.HWND, comptime T: type) !*T {
 extern "user32" fn GetWindowLongPtrW(hWnd: win32.HWND, nIndex: i32) callconv(win32.WINAPI) isize;
 
 pub fn setWindowUserPtr(win: win32.HWND, comptime T: type, ptr: *T) !void {
+    win32.kernel32.SetLastError(.SUCCESS);
+
     const addr = @intFromPtr(ptr);
     const res = SetWindowLongPtrW(win, -21, @intCast(addr));
-    if (res == 0) return error.Unexpected;
+    if (res == 0) {
+        const err = win32.kernel32.GetLastError();
+        if (err != .SUCCESS) {
+            win32.kernel32.SetLastError(err);
+            return error.Unexpected;
+        }
+    }
 }
 extern "user32" fn SetWindowLongPtrW(hWnd: win32.HWND, nIndex: i32, dwNewLong: isize) callconv(win32.WINAPI) isize;
+
+pub extern "user32" fn PostQuitMessage(nExitCode: i32) callconv(win32.WINAPI) void;
+
+pub inline fn waitMessage() !void {
+    const res = WaitMessage();
+    if (res == 0) return error.Unexpected;
+}
+extern "user32" fn WaitMessage() callconv(win32.WINAPI) win32.BOOL;
+
+pub fn getMessageW(lpMsg: *MSG, hWnd: ?win32.HWND, wMsgFilterMin: u32, wMsgFilterMax: u32) !void {
+    const res = GetMessageW(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax);
+    if (res == win32.FALSE) return error.Quit;
+    if (res < 0) return error.Unexpected;
+}
+extern "user32" fn GetMessageW(lpMsg: *MSG, hWnd: ?win32.HWND, wMsgFilterMin: c_uint, wMsgFilterMax: c_uint) callconv(win32.WINAPI) win32.BOOL;
+
+pub extern "user32" fn TranslateMessage(lpMsg: *const MSG) callconv(win32.WINAPI) win32.BOOL;
+pub extern "user32" fn DispatchMessageW(lpMsg: *const MSG) callconv(win32.WINAPI) win32.LRESULT;
+
+pub extern "user32" fn DefWindowProcW(hWnd: win32.HWND, Msg: c_uint, wParam: win32.WPARAM, lParam: win32.LPARAM) callconv(win32.WINAPI) win32.LRESULT;
 
 // === Modal dialogue boxes ===
 

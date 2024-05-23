@@ -247,7 +247,7 @@ const MiniView = struct {
         );
 
         // NOTE (Matteo): Store application pointer to be retrieved by wndProc
-        win32.setWindowUserPtr(mv.win, MiniView, mv) catch unreachable;
+        try win32.setWindowUserPtr(mv.win, MiniView, mv);
 
         _ = win32.showWindow(mv.win, win32.SW_SHOWDEFAULT);
         try win32.updateWindow(mv.win);
@@ -278,8 +278,8 @@ const MiniView = struct {
                 else => return err,
             };
 
-            _ = win32.translateMessage(&msg);
-            _ = win32.dispatchMessageW(&msg);
+            _ = win32.TranslateMessage(&msg);
+            _ = win32.DispatchMessageW(&msg);
         }
     }
 
@@ -293,7 +293,7 @@ const MiniView = struct {
         if (ptr) |mv| {
             if (mv.processEvent(msg, wparam, lparam) catch unreachable) return 0;
         }
-        return win32.defWindowProcW(win, msg, wparam, lparam);
+        return win32.DefWindowProcW(win, msg, wparam, lparam);
     }
 
     fn processEvent(
@@ -357,7 +357,7 @@ const MiniView = struct {
                     try mv.loadFile(path);
                 } else {
                     // TODO (Matteo): Print how many files were dropped?
-                    _ = try win32.messageBoxW(
+                    _ = win32.MessageBoxW(
                         mv.win,
                         L("Dropping multiple files is not supported"),
                         app_name,
@@ -752,7 +752,7 @@ const ImageStore = struct {
     }
 
     fn beginLoad(self: *ImageStore, file_name: [:0]const u16) ![]u8 {
-        const wide_path = try win32.wToPrefixedFileW(file_name);
+        const wide_path = try win32.wToPrefixedFileW(null, file_name);
 
         // NOTE (Matteo): Open file in overlapped (aka asynchronous) mode
         const file = win32.kernel32.CreateFileW(
