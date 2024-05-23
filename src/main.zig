@@ -25,10 +25,10 @@ const app_name = L("MiniView");
 // list of supported extensions and the dialog filter string at comptime
 const filter = "*.bmp;*.png;*.jpg;*.jpeg;*.tiff";
 const extensions = init: {
-    comptime var temp: [5][]const u8 = undefined;
-    comptime var tokens = mem.tokenize(u8, filter, ";*");
-    comptime var index: usize = 0;
-    inline while (tokens.next()) |token| {
+    var temp: [5][]const u8 = undefined;
+    var tokens = mem.tokenize(u8, filter, ";*");
+    var index: usize = 0;
+    while (tokens.next()) |token| {
         temp[index] = token;
         index += 1;
     }
@@ -86,18 +86,18 @@ pub fn panic(err: []const u8, maybe_trace: ?*std.builtin.StackTrace, ret_addr: ?
     // Win32 a lot of UTF8<->UTF16 conversions are involved; maybe we can mitigate
     // this a bit by fully embracing Win32 and UTF16.
     var alloc = FixedBufferAllocator.init(buf.writableSlice(0));
-    _ = win32.messageBoxW(
+    _ = win32.MessageBoxW(
         null,
         unicode.utf8ToUtf16LeWithNull(alloc.allocator(), buf.readableSlice(0)) catch unreachable,
         app_name,
         win32.MB_ICONERROR | win32.MB_OK,
-    ) catch unreachable;
+    );
 
     // TODO (Matteo): Use ret_addr for better diagnostics
     _ = ret_addr;
 
     // NOTE (Matteo): This breaks in debug builds on Windows
-    std.os.abort();
+    std.posix.abort();
 }
 
 /// Check if the given file name has a supported image format, based on the extension
@@ -247,7 +247,7 @@ const MiniView = struct {
         );
 
         // NOTE (Matteo): Store application pointer to be retrieved by wndProc
-        setWindowUserPtr(mv.win, MiniView, mv);
+        win32.setWindowUserPtr(mv.win, MiniView, mv) catch unreachable;
 
         _ = win32.showWindow(mv.win, win32.SW_SHOWDEFAULT);
         try win32.updateWindow(mv.win);
@@ -262,7 +262,7 @@ const MiniView = struct {
                 var path = PathBuf{};
                 path.len = mem.len(args[1]);
                 path.validate();
-                mem.copy(u16, path.buf[0..path.len], args[1][0..path.len]);
+                mem.copyForwards(u16, path.buf[0..path.len], args[1][0..path.len]);
                 try mv.loadFile(path);
             }
         }
@@ -289,7 +289,8 @@ const MiniView = struct {
         wparam: win32.WPARAM,
         lparam: win32.LPARAM,
     ) callconv(win32.WINAPI) win32.LRESULT {
-        if (getWindowUserPtr(win, MiniView)) |mv| {
+        const ptr = win32.getWindowUserPtr(win, MiniView) catch null;
+        if (ptr) |mv| {
             if (mv.processEvent(msg, wparam, lparam) catch unreachable) return 0;
         }
         return win32.defWindowProcW(win, msg, wparam, lparam);
@@ -375,7 +376,7 @@ const MiniView = struct {
     /// Open an image file via modal dialog
     fn open(mv: *MiniView) !void {
         var path = PathBuf{};
-        var ptr = @as([*:0]u16, @ptrCast(&path.buf[0]));
+        const ptr = @as([*:0]u16, @ptrCast(&path.buf[0]));
         var ofn = win32.OPENFILENAMEW{
             .hwndOwner = mv.win,
             .lpstrFile = ptr,
@@ -417,7 +418,7 @@ const MiniView = struct {
         mv.curr_file = 0;
         mv.files.clearRetainingCapacity();
         mv.images.clear();
-        var allocator = mv.main_mem.allocator();
+        const allocator = mv.main_mem.allocator();
 
         // Prepare pattern for iteration (copy full path, insert wilcard after the directory part and
         // terminate)
@@ -449,8 +450,8 @@ const MiniView = struct {
                 file.path.validate();
 
                 // TODO (Matteo): Cleanup
-                mem.copy(u16, file.path.buf[0..dir_name.len], dir_name);
-                mem.copy(u16, file.path.buf[dir_name.len..file.path.len], curr_name);
+                mem.copyForwards(u16, file.path.buf[0..dir_name.len], dir_name);
+                mem.copyForwards(u16, file.path.buf[dir_name.len..file.path.len], curr_name);
                 file.path.validate();
 
                 // Update browse index
@@ -502,16 +503,16 @@ const MiniView = struct {
 
     /// Display a message box indicating that the given file is not supported
     fn showNotSupported(mv: *MiniView, file_path: [:0]const u16) !void {
-        var buf = try mv.tempAlloc(u8, 3 * PathBuf.size);
+        const buf = try mv.tempAlloc(u8, 3 * PathBuf.size);
         defer mv.tempFree(buf);
 
         const out = try bufPrintW(buf, "File not supported:\n{s}", .{unicode.fmtUtf16le(file_path)});
-        _ = try win32.messageBoxW(mv.win, out, app_name, 0);
+        _ = win32.MessageBoxW(mv.win, out, app_name, 0);
     }
 
     /// Build title by composing app name and file path
     fn setTitle(mv: *MiniView, file_name: [:0]const u16) !void {
-        var buf_mem = try mv.tempAlloc(u16, app_name.len + file_name.len + 16);
+        const buf_mem = try mv.tempAlloc(u16, app_name.len + file_name.len + 16);
         defer mv.tempFree(buf_mem);
 
         var buf = RingBuffer(u16).init(buf_mem);
@@ -644,17 +645,6 @@ fn bufPrintW(buf: []u8, comptime fmt: []const u8, args: anytype) ![:0]const u16 
     return unicode.utf8ToUtf16LeWithNull(alloc.allocator(), str);
 }
 
-fn setWindowUserPtr(win: win32.HWND, comptime T: type, ptr: *T) void {
-    const addr = @intFromPtr(ptr);
-    _ = win32.setWindowLongPtrW(win, win32.GWL_USERDATA, @intCast(addr)) catch unreachable;
-}
-
-fn getWindowUserPtr(win: win32.HWND, comptime T: type) ?*T {
-    const long = win32.getWindowLongPtrW(win, win32.GWL_USERDATA) catch return null;
-    const addr: usize = @intCast(long);
-    return @ptrFromInt(addr);
-}
-
 //=== Image store implementation ===//
 
 const ImageStore = struct {
@@ -696,7 +686,7 @@ const ImageStore = struct {
     iocp: win32.HANDLE = undefined,
 
     pub fn init(memory: *Memory) !*ImageStore {
-        var self = try memory.create(ImageStore);
+        const self = try memory.create(ImageStore);
         self.* = .{
             .memory = memory,
             .scratch = std.heap.ArenaAllocator.init(memory.allocator()),
@@ -707,7 +697,7 @@ const ImageStore = struct {
     }
 
     pub fn new(self: *ImageStore) Handle {
-        const idx = @atomicRmw(Int, &self.count, .Add, 1, .SeqCst) & (cache_size - 1);
+        const idx = @atomicRmw(Int, &self.count, .Add, 1, .seq_cst) & (cache_size - 1);
 
         var node = &self.nodes[idx];
 
@@ -845,8 +835,8 @@ const ImageStore = struct {
     }
 
     fn resetScratch(self: *ImageStore) void {
-        // NOTE (Matteo): Ok to free all; the underlying implementation is a fairly efficient bump 
-        // allocator, that decommits unused memory only in safe builds in order to catch bugs; if 
+        // NOTE (Matteo): Ok to free all; the underlying implementation is a fairly efficient bump
+        // allocator, that decommits unused memory only in safe builds in order to catch bugs; if
         // the perf penalty turns out to be too high we can swith to decommit in debug builds only.
         _ = self.scratch.reset(.free_all);
     }
