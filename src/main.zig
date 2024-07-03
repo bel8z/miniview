@@ -163,6 +163,7 @@ const MiniView = struct {
     curr_file: usize = 0,
     curr_image: ?*gdip.Image = null,
 
+    paint_count: usize = 0,
     debug_buf: []u8 = &[_]u8{},
 
     const Command = enum(u32) {
@@ -535,6 +536,9 @@ const MiniView = struct {
     }
 
     fn paint(mv: *MiniView, dc: win32.HDC, rect: win32.RECT) !void {
+        // DEBUG
+        mv.paint_count +%= 1;
+
         var gfx: *gdip.Graphics = undefined;
         try gdip.checkStatus(gdip.createFromHDC(dc, &gfx));
         defer gdip.checkStatus(gdip.deleteGraphics(gfx)) catch unreachable;
@@ -586,7 +590,7 @@ const MiniView = struct {
         const total_commit = mv.main_mem.commit_pos + mv.temp_mem.commit_pos + cache_mem.commit_pos;
         const total_used = mv.main_mem.alloc_pos + mv.temp_mem.alloc_pos + cache_mem.alloc_pos;
 
-        y = mv.debugText(dc, y, "Debug mode\n# files: {}", .{mv.files.items.len});
+        y = mv.debugText(dc, y, "Debug mode\n# files: {}\nPaint count: {}", .{ mv.files.items.len, mv.paint_count });
         y = mv.debugText(dc, y, "Memory usage", .{});
 
         y = mv.debugText(dc, y, //
