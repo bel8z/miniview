@@ -584,30 +584,35 @@ const MiniView = struct {
 
     /// Write debug information on the given surface (DC)
     fn debugInfo(mv: *MiniView, dc: win32.HDC) void {
-        var y: i32 = 0;
-
         const cache_mem = mv.images.memory;
         const total_commit = mv.main_mem.commit_pos + mv.temp_mem.commit_pos + cache_mem.commit_pos;
         const total_used = mv.main_mem.alloc_pos + mv.temp_mem.alloc_pos + cache_mem.alloc_pos;
+        var y = mv.debugText(
+            dc,
+            0,
+            "Debug mode\n# files: {}\nPaint count: {}\nMemory usage",
+            .{ mv.files.items.len, mv.paint_count },
+        );
+        y = mv.debugMemory(dc, y, "Total", total_commit, total_used);
+        y = mv.debugMemory(dc, y, "Main", mv.main_mem.commit_pos, mv.main_mem.alloc_pos);
+        y = mv.debugMemory(dc, y, "Cache", cache_mem.commit_pos, cache_mem.alloc_pos);
+        y = mv.debugMemory(dc, y, "Temp", mv.temp_mem.commit_pos, mv.temp_mem.alloc_pos);
+    }
 
-        y = mv.debugText(dc, y, "Debug mode\n# files: {}\nPaint count: {}", .{ mv.files.items.len, mv.paint_count });
-        y = mv.debugText(dc, y, "Memory usage", .{});
-
-        y = mv.debugText(dc, y, //
-            "\tTotal: \n\t\tCommitted: {}\n\t\tUsed: {}\n\t\tWaste: {}", //
-            .{ total_commit, total_used, total_commit - total_used });
-
-        y = mv.debugText(dc, y, //
-            "\tMain:  \n\t\tCommitted: {}\n\t\tUsed: {}\n\t\tWaste: {}", //
-            .{ mv.main_mem.commit_pos, mv.main_mem.alloc_pos, mv.main_mem.commit_pos - mv.main_mem.alloc_pos });
-
-        y = mv.debugText(dc, y, //
-            "\tCache: \n\t\tCommitted: {}\n\t\tUsed: {}\n\t\tWaste: {}", //
-            .{ cache_mem.commit_pos, cache_mem.alloc_pos, cache_mem.commit_pos - cache_mem.alloc_pos });
-
-        y = mv.debugText(dc, y, //
-            "\tTemp:\n\t\tCommitted: {}\n\t\tUsed: {}\n\t\tWaste: {}", //
-            .{ mv.temp_mem.commit_pos, mv.temp_mem.alloc_pos, mv.temp_mem.commit_pos - mv.temp_mem.alloc_pos });
+    fn debugMemory(
+        mv: *MiniView,
+        dc: win32.HDC,
+        y: i32,
+        header: []const u8,
+        committed: usize,
+        allocated: usize,
+    ) i32 {
+        return mv.debugText(
+            dc,
+            y,
+            "\t{s}: \n\t\tCommitted: {}\n\t\tUsed: {}\n\t\tWaste: {}",
+            .{ header, committed, allocated, committed - allocated },
+        );
     }
 
     fn debugText(mv: *MiniView, dc: win32.HDC, y: i32, comptime fmt: []const u8, args: anytype) i32 {
