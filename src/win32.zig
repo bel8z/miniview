@@ -20,7 +20,11 @@ pub inline fn getCurrentInstance() win32.HINSTANCE {
     );
 }
 
-pub inline fn loadProc(comptime T: type, comptime name: [*:0]const u8, handle: win32.HMODULE) Error!T {
+pub inline fn loadProc(
+    comptime T: type,
+    comptime name: [*:0]const u8,
+    handle: win32.HMODULE,
+) Error!T {
     return @as(T, @ptrCast(win32.kernel32.GetProcAddress(handle, name) orelse
         return error.Unexpected));
 }
@@ -63,9 +67,31 @@ extern "user32" fn GetClientRect(
     rect_ptr: *win32.RECT,
 ) callconv(win32.WINAPI) win32.BOOL;
 
-pub inline fn getCursorPos(win: win32.HWND) win32.POINT {
-    var point: win32.RECT = undefined;
-    const result = GetCursorPos(win, &point);
+pub inline fn getWindowRect(win: win32.HWND) win32.RECT {
+    var rect: win32.RECT = undefined;
+    const result = GetWindowRect(win, &rect);
+    assert(result != 0);
+    return rect;
+}
+
+extern "user32" fn GetWindowRect(
+    hwnd: win32.HWND,
+    rect_ptr: *win32.RECT,
+) callconv(win32.WINAPI) win32.BOOL;
+
+pub fn getDC(hwnd: win32.HWND) !win32.HDC {
+    return GetDC(hwnd) orelse error.Unexpected;
+}
+extern "user32" fn GetDC(hwnd: win32.HWND) callconv(win32.WINAPI) ?win32.HDC;
+
+pub fn releaseDC(hwnd: win32.HWND, hdc: win32.HDC) bool {
+    return ReleaseDC(hwnd, hdc) == 1;
+}
+extern "user32" fn ReleaseDC(hwnd: win32.HWND, hdc: win32.HDC) callconv(win32.WINAPI) c_int;
+
+pub inline fn getCursorPos() win32.POINT {
+    var point: win32.POINT = undefined;
+    const result = GetCursorPos(&point);
     assert(result != 0);
     return point;
 }
@@ -98,14 +124,14 @@ pub extern "user32" fn KillTimer(
 pub inline fn pointToClient(win: win32.HWND, screen_point: win32.POINT) win32.POINT {
     var client_point: win32.POINT = screen_point;
     const result = ScreenToClient(win, &client_point);
-    assert(result);
+    assert(result == win32.TRUE);
     return client_point;
 }
 
 pub inline fn pointToScreen(win: win32.HWND, client_point: win32.POINT) win32.POINT {
     var screen_point: win32.POINT = client_point;
-    const result = ScreenToClient(win, &screen_point);
-    assert(result);
+    const result = ClientToScreen(win, &screen_point);
+    assert(result == win32.TRUE);
     return screen_point;
 }
 
@@ -118,6 +144,68 @@ extern "user32" fn ClientToScreen(
     hwnd: win32.HWND,
     point: *win32.POINT,
 ) callconv(win32.WINAPI) win32.BOOL;
+
+pub const DisplayInfo = struct {
+    width: u32,
+    height: u32,
+    bitsPerPixel: u32,
+    frequency: u32,
+    flags: u32,
+};
+
+pub fn getDisplayInfo() !DisplayInfo {
+    var devmode = std.mem.zeroInit(DEVMODEW, .{ .dmSize = @sizeOf(DEVMODEW) });
+
+    if (EnumDisplaySettingsW(null, -1, &devmode) == win32.TRUE) {
+        return DisplayInfo{
+            .width = devmode.dmPelsWidth,
+            .height = devmode.dmPelsHeight,
+            .bitsPerPixel = devmode.dmBitsPerPel,
+            .frequency = devmode.dmDisplayFrequency,
+            .flags = devmode.dmDisplayFlags,
+        };
+    }
+
+    return error.Unexpected;
+}
+
+extern "user32" fn EnumDisplaySettingsW(
+    lpszDeviceName: ?win32.LPCWSTR,
+    iModeNum: i32,
+    lpDevMode: [*c]DEVMODEW,
+) callconv(win32.WINAPI) win32.BOOL;
+
+const DEVMODEW = extern struct {
+    dmDeviceName: [32]u16,
+    dmSpecVersion: u16,
+    dmDriverVersion: u16,
+    dmSize: u16,
+    dmDriverExtra: u16,
+    dmFields: u32,
+    dmPosition: win32.POINT,
+    dmDisplayOrientation: u32,
+    dmDisplayFixedOutput: u32,
+    dmColor: c_short,
+    dmDuplex: c_short,
+    dmYResolution: c_short,
+    dmTTOption: c_short,
+    dmCollate: c_short,
+    dmFormName: [32]u16,
+    dmLogPixels: u16,
+    dmBitsPerPel: u32,
+    dmPelsWidth: u32,
+    dmPelsHeight: u32,
+    dmDisplayFlags: u32,
+    dmDisplayFrequency: u32,
+    dmICMMethod: u32,
+    dmICMIntent: u32,
+    dmMediaType: u32,
+    dmDitherType: u32,
+    dmReserved1: u32,
+    dmReserved2: u32,
+    dmPanningWidth: u32,
+    dmPanningHeight: u32,
+};
 
 // === Windows ===
 
@@ -432,7 +520,12 @@ pub const SW_SHOWDEFAULT = 10;
 pub const SW_FORCEMINIMIZE = 11;
 pub const SW_MAX = 11;
 
-pub const WNDPROC = *const fn (hwnd: win32.HWND, uMsg: c_uint, wParam: win32.WPARAM, lParam: win32.LPARAM) callconv(win32.WINAPI) win32.LRESULT;
+pub const WNDPROC = *const fn (
+    hwnd: win32.HWND,
+    uMsg: c_uint,
+    wParam: win32.WPARAM,
+    lParam: win32.LPARAM,
+) callconv(win32.WINAPI) win32.LRESULT;
 
 pub const MSG = extern struct {
     hWnd: ?win32.HWND,
@@ -466,6 +559,15 @@ pub fn registerClassExW(window_class: *const WNDCLASSEXW) !win32.ATOM {
 }
 extern "user32" fn RegisterClassExW(*const WNDCLASSEXW) callconv(win32.WINAPI) win32.ATOM;
 
+pub fn unregisterClassW(name: win32.LPCWSTR, instance: win32.HINSTANCE) !void {
+    const res = UnregisterClassW(name, instance);
+    if (res == win32.FALSE) return error.Unexpected;
+}
+extern "user32" fn UnregisterClassW(
+    name: win32.LPCWSTR,
+    instance: win32.HINSTANCE,
+) callconv(win32.WINAPI) win32.BOOL;
+
 pub fn createWindowExW(
     dwExStyle: u32,
     lpClassName: win32.LPCWSTR,
@@ -480,7 +582,20 @@ pub fn createWindowExW(
     hInstance: win32.HINSTANCE,
     lpParam: ?win32.LPVOID,
 ) !win32.HWND {
-    const window = CreateWindowExW(dwExStyle, lpClassName, lpWindowName, dwStyle, X, Y, nWidth, nHeight, hWindParent, hMenu, hInstance, lpParam);
+    const window = CreateWindowExW(
+        dwExStyle,
+        lpClassName,
+        lpWindowName,
+        dwStyle,
+        X,
+        Y,
+        nWidth,
+        nHeight,
+        hWindParent,
+        hMenu,
+        hInstance,
+        lpParam,
+    );
     if (window) |win| return win;
     return error.Unexpected;
 }
@@ -551,12 +666,34 @@ pub fn getMessageW(lpMsg: *MSG, hWnd: ?win32.HWND, wMsgFilterMin: u32, wMsgFilte
     if (res == win32.FALSE) return error.Quit;
     if (res < 0) return error.Unexpected;
 }
-extern "user32" fn GetMessageW(lpMsg: *MSG, hWnd: ?win32.HWND, wMsgFilterMin: c_uint, wMsgFilterMax: c_uint) callconv(win32.WINAPI) win32.BOOL;
+extern "user32" fn GetMessageW(
+    lpMsg: *MSG,
+    hWnd: ?win32.HWND,
+    wMsgFilterMin: c_uint,
+    wMsgFilterMax: c_uint,
+) callconv(win32.WINAPI) win32.BOOL;
+
+pub const PM_NOREMOVE = 0x0000;
+pub const PM_REMOVE = 0x0001;
+pub const PM_NOYIELD = 0x0002;
+
+pub extern "user32" fn PeekMessageW(
+    msg: *MSG,
+    wnd: ?win32.HWND,
+    wMsgFilterMin: c_uint,
+    wMsgFilterMax: c_uint,
+    wRemoveMsg: c_uint,
+) callconv(win32.WINAPI) win32.BOOL;
 
 pub extern "user32" fn TranslateMessage(lpMsg: *const MSG) callconv(win32.WINAPI) win32.BOOL;
 pub extern "user32" fn DispatchMessageW(lpMsg: *const MSG) callconv(win32.WINAPI) win32.LRESULT;
 
-pub extern "user32" fn DefWindowProcW(hWnd: win32.HWND, Msg: c_uint, wParam: win32.WPARAM, lParam: win32.LPARAM) callconv(win32.WINAPI) win32.LRESULT;
+pub extern "user32" fn DefWindowProcW(
+    hWnd: win32.HWND,
+    Msg: c_uint,
+    wParam: win32.WPARAM,
+    lParam: win32.LPARAM,
+) callconv(win32.WINAPI) win32.LRESULT;
 
 // === Modal dialogue boxes ===
 
